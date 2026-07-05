@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>WordMesh — Phase 0</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #04060c; height: 100%; touch-action: manipulation; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  canvas#c { display: block; width: 100vw; height: 100dvh; touch-action: none; }
+
+  #hud {
+    position: fixed; inset: 0; pointer-events: none;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    z-index: 10;
+  }
+  #hud.in-xr { display: none; }
+
+  .panel {
+    position: absolute;
+    color: #dfe8ff;
+    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+  }
+
+  #title-block { top: 14px; left: 16px; pointer-events: none; }
+  #title-block h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0.5px; }
+  #title-block .sub { font-size: 11px; opacity: 0.65; margin-top: 2px; }
+
+  #mock-badge {
+    display: inline-block; margin-top: 6px;
+    font-size: 10px; font-weight: 700; letter-spacing: 1px;
+    padding: 3px 8px; border-radius: 4px;
+    background: rgba(255, 176, 32, 0.18); color: #ffb020;
+    border: 1px solid rgba(255, 176, 32, 0.45);
+  }
+  #mock-badge.live { background: rgba(50, 220, 140, 0.18); color: #32dc8c; border-color: rgba(50, 220, 140, 0.45); }
+
+  #mode-switcher {
+    top: 14px; right: 16px; display: flex; gap: 6px; pointer-events: auto;
+  }
+  .mode-btn {
+    background: rgba(10, 14, 26, 0.72); border: 1px solid rgba(140, 170, 255, 0.35);
+    color: #cdd9ff; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;
+    padding: 8px 12px; border-radius: 8px; cursor: pointer; backdrop-filter: blur(6px);
+  }
+  .mode-btn:hover:not(:disabled) { background: rgba(60, 90, 200, 0.35); }
+  .mode-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .mode-btn.active { border-color: #7de0ff; color: #7de0ff; }
+
+  #bottom-bar {
+    bottom: 14px; left: 16px; right: 16px; display: flex; justify-content: space-between;
+    align-items: flex-end; pointer-events: none; gap: 10px;
+  }
+  #left-controls, #right-controls { pointer-events: auto; display: flex; gap: 8px; align-items: center; }
+  .pill-btn {
+    background: rgba(10, 14, 26, 0.72); border: 1px solid rgba(140, 170, 255, 0.35);
+    color: #cdd9ff; font-size: 11px; font-weight: 600; padding: 9px 13px; border-radius: 20px;
+    cursor: pointer; backdrop-filter: blur(6px); user-select: none;
+  }
+  .pill-btn.on { border-color: #7de0ff; color: #7de0ff; background: rgba(60,120,200,0.28); }
+
+  #footer-link { font-size: 10px; opacity: 0.55; pointer-events: auto; }
+  #footer-link a { color: #9db6ff; text-decoration: none; }
+
+  #controls-hint {
+    top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 13px; text-align: center; background: rgba(6,9,18,0.55);
+    padding: 10px 16px; border-radius: 10px; border: 1px solid rgba(140,170,255,0.25);
+    transition: opacity 0.6s ease; opacity: 1; pointer-events: none;
+  }
+  #controls-hint.hidden { opacity: 0; }
+
+  #esc-hint {
+    top: 14px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; background: rgba(6,9,18,0.6); padding: 5px 10px; border-radius: 6px;
+    display: none;
+  }
+  #esc-hint.show { display: block; }
+
+  #joystick-wrap {
+    position: fixed; left: 20px; bottom: 20px; width: 110px; height: 110px;
+    display: none; pointer-events: auto; z-index: 11;
+  }
+  #joystick-wrap.show { display: block; }
+  #joystick-base {
+    position: absolute; inset: 0; border-radius: 50%;
+    background: rgba(20,26,46,0.5); border: 1px solid rgba(140,170,255,0.35);
+  }
+  #joystick-nub {
+    position: absolute; width: 44px; height: 44px; border-radius: 50%;
+    left: 33px; top: 33px; background: rgba(125,224,255,0.55); border: 1px solid rgba(200,240,255,0.7);
+  }
+
+  #node-info {
+    top: 60px; left: 16px; max-width: 240px; font-size: 12px;
+    background: rgba(6,9,18,0.65); border: 1px solid rgba(140,170,255,0.25);
+    padding: 8px 10px; border-radius: 8px; display: none;
+  }
+  #node-info.show { display: block; }
+  #node-info b { color: #7de0ff; }
+
+  .xr-only { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud">
+  <div class="panel" id="title-block">
+    <h1>WordMesh</h1>
+    <div class="sub">Superhero.com word-token mesh · Phase 0</div>
+    <div id="mock-badge">MOCK DATA</div>
+  </div>
+
+  <div id="node-info" class="panel"></div>
+
+  <div class="panel" id="mode-switcher">
+    <button class="mode-btn active" id="btn-flat">Screen</button>
+    <button class="mode-btn" id="btn-vr" disabled>VR</button>
+    <button class="mode-btn" id="btn-ar" disabled>AR</button>
+  </div>
+
+  <div class="panel" id="esc-hint">press ESC to release look-lock</div>
+
+  <div class="panel" id="bottom-bar">
+    <div id="left-controls">
+      <button class="pill-btn on" id="btn-fly">Fly: ON</button>
+      <button class="pill-btn" id="btn-freelook">Free look: OFF</button>
+    </div>
+    <div id="footer-link">
+      <a href="https://github.com/developerofwebxr-oss/wordmesh?ref=wordmesh" target="_blank" rel="noopener">wordmesh · repo</a>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="controls-hint">hold-drag to look · WASD to fly · F to toggle fly/walk</div>
+<div id="joystick-wrap"><div id="joystick-base"></div><div id="joystick-nub"></div></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+
+/* ============================================================
+   DataSource interface (locked seam — CLAUDE.md decision 5)
+   getSnapshot(): Promise<{tokens: [{word, price, volume24h}]}>
+   subscribe(cb): live events {type:'buy'|'sell'|'tip', word, amount, ts} -> unsubscribe fn
+   getReplay(days): Promise<event[]>
+   ============================================================ */
+
+function buildVocabulary(count) {
+  const A = ["MOON","APE","DEGEN","HODL","PEPE","WAGMI","GM","CHAD","BASED","ANON","FREN","NGMI","REKT","FOMO",
+    "DYOR","LAMBO","DIAMOND","PAPER","BULL","BEAR","WHALE","SHRIMP","NODE","MESH","PULSE","CHAIN","BLOCK","TOKEN",
+    "COIN","VAULT","FORGE","NOVA","ECHO","FLUX","ORBIT","ZENITH","CIPHER","QUANTUM","NEON","PIXEL","GLITCH",
+    "SIGNAL","BEACON","RELAY","SPARK","EMBER","FROST","STORM","TIDE","DUNE","CORAL","ONYX","JADE","IVORY","CORE",
+    "EDGE","PEAK","VOID","RIFT","WAVE","GRIT","HALO","EPOCH","DRIFT","FABLE","OMEN","RUNE","SIGIL","TEMPO"];
+  const B = ["AE","SUPERHERO","TRENDMINER","DAO","FI","SWAP","VERSE","LAND","WORLD","NET","LINK","HUB","LAB",
+    "ZONE","GRID","FIELD","SPACE","PORT","GATE","CHAIN"];
+  const words = new Set();
+  for (const a of A) words.add(a);
+  let bi = 0;
+  outer: while (words.size < count) {
+    for (const a of A) {
+      const b = B[bi % B.length];
+      words.add(`${a}${b}`);
+      if (words.size >= count) break outer;
+    }
+    bi++;
+    if (bi > B.length * 4) break;
+  }
+  return Array.from(words).slice(0, count);
+}
+
+const FULL_VOCAB = buildVocabulary(320);
+const NODE_COUNT = 220;
+
+function poissonDelay(meanMs) {
+  return -Math.log(1 - Math.random()) * meanMs;
+}
+
+class MockSource {
+  constructor(words) {
+    this.words = words;
+    this.state = new Map();
+    for (const w of this.words) {
+      this.state.set(w, {
+        word: w,
+        price: 0.002 + Math.random() * Math.random() * 4,
+        volume24h: Math.random() * Math.random() * 50000,
+      });
+    }
+  }
+
+  async getSnapshot() {
+    return { tokens: Array.from(this.state.values()).map((t) => ({ ...t })) };
+  }
+
+  subscribe(cb) {
+    let alive = true;
+    const tick = () => {
+      if (!alive) return;
+      const word = this.words[(Math.random() * this.words.length) | 0];
+      const type = Math.random() < 0.72 ? "buy" : "sell";
+      const amount = Math.round((5 + Math.random() * Math.random() * 500));
+      const st = this.state.get(word);
+      if (st) {
+        st.volume24h += amount;
+        st.price = Math.max(0.0005, st.price * (type === "buy" ? 1 + Math.random() * 0.04 : 1 - Math.random() * 0.03));
+      }
+      cb({ type, word, amount, ts: Date.now() });
+      setTimeout(tick, poissonDelay(1400));
+    };
+    setTimeout(tick, poissonDelay(1400));
+    return () => { alive = false; };
+  }
+
+  async getReplay(days = 7) {
+    const events = [];
+    const n = Math.round(days * 40);
+    const now = Date.now();
+    for (let i = 0; i < n; i++) {
+      const word = this.words[(Math.random() * this.words.length) | 0];
+      events.push({
+        type: Math.random() < 0.7 ? "buy" : "sell",
+        word,
+        amount: Math.round(5 + Math.random() * 300),
+        ts: now - Math.random() * days * 86400000,
+      });
+    }
+    return events.sort((a, b) => a.ts - b.ts);
+  }
+}
+
+const params = new URLSearchParams(location.search);
+const dataMode = params.get("data") === "live" ? "live" : "mock";
+if (dataMode === "live") {
+  console.warn("[WordMesh] ?data=live requested but SuperheroSource is not implemented in Phase 0 — falling back to MockSource. See CLAUDE.md Phase 1.");
+}
+const source = new MockSource(FULL_VOCAB.slice(0, NODE_COUNT));
+document.getElementById("mock-badge").textContent = "MOCK DATA";
+
+/* ============================================================
+   Renderer / scene / camera rig
+   ============================================================ */
+
+const canvas = document.getElementById("c");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.xr.enabled = true;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x030509);
+scene.fog = new THREE.FogExp2(0x030509, 0.0085);
+
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.05, 800);
+const EYE_HEIGHT = 1.6;
+camera.position.set(0, 0, 0);
+
+const rig = new THREE.Group();
+rig.position.set(0, 0, 24);
+rig.add(camera);
+scene.add(rig);
+
+function applyFlatEyeHeight() {
+  if (!renderer.xr.isPresenting) camera.position.y = EYE_HEIGHT;
+}
+applyFlatEyeHeight();
+
+const hemi = new THREE.HemisphereLight(0x8fb8ff, 0x0a0812, 0.55);
+scene.add(hemi);
+const dirLight = new THREE.DirectionalLight(0xbcd4ff, 0.35);
+dirLight.position.set(10, 20, 10);
+scene.add(dirLight);
+
+/* ---- starfield backdrop (round, varied — threejs-visual-polish) ---- */
+function makeCircleTexture() {
+  const size = 64;
+  const cnv = document.createElement("canvas");
+  cnv.width = cnv.height = size;
+  const ctx = cnv.getContext("2d");
+  const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  g.addColorStop(0, "rgba(255,255,255,1)");
+  g.addColorStop(0.4, "rgba(255,255,255,0.7)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(cnv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const circleTex = makeCircleTexture();
+
+function buildStarfield() {
+  const STAR_COUNT = 1400;
+  const positions = new Float32Array(STAR_COUNT * 3);
+  const colors = new Float32Array(STAR_COUNT * 3);
+  const sizes = new Float32Array(STAR_COUNT);
+  const color = new THREE.Color();
+  for (let i = 0; i < STAR_COUNT; i++) {
+    const r = 260 + Math.random() * 140;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    positions[i*3+0] = r * Math.sin(phi) * Math.cos(theta);
+    positions[i*3+1] = r * Math.cos(phi);
+    positions[i*3+2] = r * Math.sin(phi) * Math.sin(theta);
+    const warmth = Math.random();
+    if (warmth < 0.08) color.setHSL(0.08, 0.6, 0.75);
+    else if (warmth < 0.16) color.setHSL(0.58, 0.5, 0.78);
+    else color.setHSL(0.6, 0.05, 0.9);
+    color.toArray(colors, i*3);
+    sizes[i] = Math.random() < 0.06 ? 2.6 + Math.random()*2 : 0.6 + Math.random()*1.2;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute("size", new THREE.BufferAttribute(sizes, 1));
+  const mat = new THREE.PointsMaterial({
+    size: 1, map: circleTex, vertexColors: true, transparent: true,
+    depthWrite: false, sizeAttenuation: true,
+  });
+  const pts = new THREE.Points(geo, mat);
+  scene.add(pts);
+}
+buildStarfield();
+
+/* ============================================================
+   Word-node mesh (InstancedMesh, one draw call — perf budget)
+   ============================================================ */
+
+const words = FULL_VOCAB.slice(0, NODE_COUNT);
+const nodeGeo = new THREE.IcosahedronGeometry(1, 1);
+const nodeMat = new THREE.MeshStandardMaterial({
+  color: 0x224466, emissive: 0x2255ff, emissiveIntensity: 1.4,
+  roughness: 0.4, metalness: 0.1,
+});
+const nodeMesh = new THREE.InstancedMesh(nodeGeo, nodeMat, NODE_COUNT);
+nodeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(nodeMesh);
+
+// distant LOD: point-sprite stand-ins, swapped in per-frame by hiding the
+// corresponding instanced mesh instance (scale 0) beyond LOD_DIST
+const LOD_DIST = 55;
+const LABEL_DIST = 8;
+const farGeo = new THREE.BufferGeometry();
+const farPositions = new Float32Array(NODE_COUNT * 3);
+const farColors = new Float32Array(NODE_COUNT * 3);
+farGeo.setAttribute("position", new THREE.BufferAttribute(farPositions, 3));
+farGeo.setAttribute("color", new THREE.BufferAttribute(farColors, 3));
+farGeo.setDrawRange(0, 0);
+const farMat = new THREE.PointsMaterial({
+  size: 3.2, map: circleTex, vertexColors: true, transparent: true, opacity: 0.9,
+  depthWrite: false, sizeAttenuation: true,
+});
+const farPoints = new THREE.Points(farGeo, farMat);
+scene.add(farPoints);
+
+const nodeData = [];
+const tmpObj = new THREE.Object3D();
+const tmpColor = new THREE.Color();
+
+function priceToScale(price) { return 0.35 + Math.min(1.6, Math.log10(1 + price * 40) * 0.55); }
+function volumeToIntensity(vol) { return 0.6 + Math.min(2.4, Math.log10(1 + vol) * 0.4); }
+function hueForWord(i) {
+  return (i * 0.618033) % 1;
+}
+
+async function initNodes() {
+  const snap = await source.getSnapshot();
+  const byWord = new Map(snap.tokens.map((t) => [t.word, t]));
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const tok = byWord.get(word);
+    const r = 14 + Math.random() * 46;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const pos = new THREE.Vector3(
+      r * Math.sin(phi) * Math.cos(theta),
+      r * Math.cos(phi) * 0.6,
+      r * Math.sin(phi) * Math.sin(theta)
+    );
+    const hue = hueForWord(i);
+    const baseColor = new THREE.Color().setHSL(hue, 0.75, 0.55);
+    const entry = {
+      word, index: i, alive: true,
+      price: tok.price, volume24h: tok.volume24h,
+      pos, baseColor,
+      scale: priceToScale(tok.price),
+      intensity: volumeToIntensity(tok.volume24h),
+      flare: 0, // decays each frame, added to intensity/scale on events
+      dying: false, dieT: 0, spawnT: 1,
+    };
+    nodeData.push(entry);
+  }
+  refreshInstances();
+  buildEdges();
+}
+
+function refreshInstances() {
+  for (const n of nodeData) {
+    const s = (n.alive && !n.isFar ? n.scale : 0) * n.spawnT * (1 + n.flare * 0.9);
+    tmpObj.position.copy(n.pos);
+    tmpObj.scale.setScalar(Math.max(0.0001, s * 0.55));
+    tmpObj.rotation.set(0, 0, 0);
+    tmpObj.updateMatrix();
+    nodeMesh.setMatrixAt(n.index, tmpObj.matrix);
+    const mult = Math.min(1.6, (n.intensity + n.flare * 2.2) * 0.5);
+    tmpColor.copy(n.baseColor).multiplyScalar(mult);
+    nodeMesh.setColorAt(n.index, tmpColor);
+  }
+  nodeMesh.instanceMatrix.needsUpdate = true;
+  if (nodeMesh.instanceColor) nodeMesh.instanceColor.needsUpdate = true;
+}
+
+/* ---- related-word edges: single LineSegments buffer, rebuilt <=1/s ---- */
+const MAX_EDGES = NODE_COUNT * 3;
+const edgeGeo = new THREE.BufferGeometry();
+const edgePositions = new Float32Array(MAX_EDGES * 2 * 3);
+const edgeColors = new Float32Array(MAX_EDGES * 2 * 3);
+edgeGeo.setAttribute("position", new THREE.BufferAttribute(edgePositions, 3));
+edgeGeo.setAttribute("color", new THREE.BufferAttribute(edgeColors, 3));
+edgeGeo.setDrawRange(0, 0);
+const edgeMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending });
+const edgeLines = new THREE.LineSegments(edgeGeo, edgeMat);
+scene.add(edgeLines);
+
+let adjacency = []; // adjacency[i] = Set of neighbor indices
+
+function nearestNeighbors(i, k) {
+  const src = nodeData[i];
+  const dists = [];
+  for (const n of nodeData) {
+    if (n.index === i || !n.alive) continue;
+    dists.push([n.index, src.pos.distanceToSquared(n.pos)]);
+  }
+  dists.sort((a, b) => a[1] - b[1]);
+  return dists.slice(0, k).map((d) => d[0]);
+}
+
+function buildEdges() {
+  adjacency = nodeData.map(() => new Set());
+  for (const n of nodeData) {
+    if (!n.alive) continue;
+    const k = 2 + ((n.index % 3) === 0 ? 1 : 0);
+    for (const j of nearestNeighbors(n.index, k)) {
+      adjacency[n.index].add(j);
+      adjacency[j].add(n.index);
+    }
+  }
+  writeEdgeBuffer();
+}
+
+function writeEdgeBuffer() {
+  let vi = 0;
+  const seen = new Set();
+  outer: for (let i = 0; i < adjacency.length; i++) {
+    for (const j of adjacency[i]) {
+      const key = i < j ? `${i}_${j}` : `${j}_${i}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (vi >= MAX_EDGES) break outer;
+      const a = nodeData[i], b = nodeData[j];
+      edgePositions[vi*6+0] = a.pos.x; edgePositions[vi*6+1] = a.pos.y; edgePositions[vi*6+2] = a.pos.z;
+      edgePositions[vi*6+3] = b.pos.x; edgePositions[vi*6+4] = b.pos.y; edgePositions[vi*6+5] = b.pos.z;
+      const c1 = a.baseColor, c2 = b.baseColor;
+      edgeColors[vi*6+0]=c1.r; edgeColors[vi*6+1]=c1.g; edgeColors[vi*6+2]=c1.b;
+      edgeColors[vi*6+3]=c2.r; edgeColors[vi*6+4]=c2.g; edgeColors[vi*6+5]=c2.b;
+      vi++;
+    }
+  }
+  edgeGeo.setDrawRange(0, vi * 2);
+  edgeGeo.attributes.position.needsUpdate = true;
+  edgeGeo.attributes.color.needsUpdate = true;
+  edgeLines.userData.edgeList = Array.from(seen).map((k) => k.split("_").map(Number));
+}
+
+/* ============================================================
+   Pulses — light traveling down an edge (shader/uv anim, pooled)
+   ============================================================ */
+const MAX_PULSES = 48;
+const pulseGeo = new THREE.SphereGeometry(1, 6, 6);
+const pulseMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending });
+const pulseMesh = new THREE.InstancedMesh(pulseGeo, pulseMat, MAX_PULSES);
+pulseMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(pulseMesh);
+const pulses = []; // {from, to, t, speed, color, replay}
+for (let i = 0; i < MAX_PULSES; i++) pulses.push({ active: false });
+const _pv = new THREE.Vector3();
+
+function spawnPulse(fromIdx, toIdx, color, replay = false) {
+  const slot = pulses.find((p) => !p.active);
+  if (!slot) return;
+  slot.active = true;
+  slot.from = fromIdx; slot.to = toIdx; slot.t = 0;
+  slot.speed = replay ? 0.35 : 0.6 + Math.random() * 0.3;
+  slot.color = color; slot.replay = replay;
+}
+
+function edgeTowardNode(targetIdx) {
+  const neighbors = adjacency[targetIdx];
+  if (!neighbors || neighbors.size === 0) return null;
+  const arr = Array.from(neighbors).filter((j) => nodeData[j].alive);
+  if (arr.length === 0) return null;
+  return arr[(Math.random() * arr.length) | 0];
+}
+
+/* ============================================================
+   Node flare + Erlang beat (die / reroute / respawn every ~60s)
+   ============================================================ */
+const usedWords = new Set(words);
+const spareWords = FULL_VOCAB.filter((w) => !usedWords.has(w));
+
+function flareNode(word, type) {
+  const n = nodeData.find((d) => d.word === word && d.alive);
+  if (!n) return;
+  n.flare = type === "sell" ? 0.35 : 0.9;
+  const fromIdx = edgeTowardNode(n.index);
+  if (fromIdx !== null) spawnPulse(fromIdx, n.index, n.baseColor.clone().lerp(new THREE.Color(0xffffff), 0.4), false);
+  updateNodeInfo(n, type);
+}
+
+function onDataEvent(evt) {
+  if (evt.type === "buy" || evt.type === "sell") flareNode(evt.word, evt.type);
+}
+source.subscribe(onDataEvent);
+
+let lastInfoNode = null, infoTimeout = null;
+function updateNodeInfo(n, type) {
+  lastInfoNode = n;
+  const el = document.getElementById("node-info");
+  el.innerHTML = `<b>${n.word}</b><br/>${type.toUpperCase()} · price ${n.price.toFixed(4)} AE · vol24h ${Math.round(n.volume24h)}`;
+  el.classList.add("show");
+  clearTimeout(infoTimeout);
+  infoTimeout = setTimeout(() => el.classList.remove("show"), 2600);
+}
+
+const ERLANG_INTERVAL = 60000;
+let erlangTimer = 0;
+function erlangBeat() {
+  const alive = nodeData.filter((n) => n.alive && !n.dying);
+  if (alive.length === 0) return;
+  const victim = alive[(Math.random() * alive.length) | 0];
+  victim.dying = true;
+  victim.dieT = 0;
+}
+
+function reviveSlot(n) {
+  const pool = spareWords.length ? spareWords : FULL_VOCAB;
+  const newWord = pool[(Math.random() * pool.length) | 0];
+  const idx = spareWords.indexOf(newWord);
+  if (idx >= 0) spareWords.splice(idx, 1);
+  n.word = newWord;
+  n.price = 0.002 + Math.random() * Math.random() * 4;
+  n.volume24h = Math.random() * Math.random() * 50000;
+  n.scale = priceToScale(n.price);
+  n.intensity = volumeToIntensity(n.volume24h);
+  const r = 14 + Math.random() * 46;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  n.pos.set(r * Math.sin(phi) * Math.cos(theta), r * Math.cos(phi) * 0.6, r * Math.sin(phi) * Math.sin(theta));
+  n.baseColor = new THREE.Color().setHSL(Math.random(), 0.75, 0.55);
+  n.alive = true; n.dying = false; n.spawnT = 0;
+}
+
+/* ============================================================
+   WebXR mode switcher (skill: enter/exit lifecycle, sessionend)
+   ============================================================ */
+const btnFlat = document.getElementById("btn-flat");
+const btnVR = document.getElementById("btn-vr");
+const btnAR = document.getElementById("btn-ar");
+const hud = document.getElementById("hud");
+let currentSession = null;
+
+async function detectXRSupport() {
+  if (!navigator.xr) return;
+  try { if (await navigator.xr.isSessionSupported("immersive-vr")) btnVR.disabled = false; } catch {}
+  try { if (await navigator.xr.isSessionSupported("immersive-ar")) btnAR.disabled = false; } catch {}
+}
+detectXRSupport();
+
+const savedBackground = scene.background;
+const savedFog = scene.fog;
+
+async function enterXR(mode) {
+  if (!navigator.xr) return;
+  try {
+    const session = await navigator.xr.requestSession(mode, {
+      optionalFeatures: ["local-floor", "dom-overlay", "hit-test"],
+      domOverlay: mode === "immersive-ar" ? { root: document.body } : undefined,
+    });
+    currentSession = session;
+    await renderer.xr.setSession(session);
+    hud.classList.add("in-xr");
+    [btnFlat, btnVR, btnAR].forEach((b) => b.classList.remove("active"));
+    (mode === "immersive-vr" ? btnVR : btnAR).classList.add("active");
+    if (mode === "immersive-ar") {
+      // AR passthrough is the environment — suppress the opaque backdrop/fog
+      // shell entirely so the real world shows through (shell-off in AR).
+      scene.background = null;
+      scene.fog = null;
+    }
+    session.addEventListener("end", onXRSessionEnd);
+  } catch (err) {
+    console.warn("[WordMesh] XR session request failed:", err);
+  }
+}
+function onXRSessionEnd() {
+  currentSession = null;
+  hud.classList.remove("in-xr");
+  [btnFlat, btnVR, btnAR].forEach((b) => b.classList.remove("active"));
+  btnFlat.classList.add("active");
+  scene.background = savedBackground;
+  scene.fog = savedFog;
+  applyFlatEyeHeight();
+}
+renderer.xr.addEventListener("sessionend", onXRSessionEnd);
+
+btnFlat.addEventListener("click", () => { if (currentSession) currentSession.end(); });
+btnVR.addEventListener("click", () => enterXR("immersive-vr"));
+btnAR.addEventListener("click", () => enterXR("immersive-ar"));
+
+/* ============================================================
+   Locomotion — desktop / mobile / VR (unified fly-by-default)
+   ============================================================ */
+const isCoarsePointer = matchMedia("(pointer: coarse) and (not (pointer: fine))").matches;
+let flyMode = true;
+const btnFly = document.getElementById("btn-fly");
+btnFly.addEventListener("click", () => {
+  flyMode = !flyMode;
+  btnFly.textContent = `Fly: ${flyMode ? "ON" : "OFF"}`;
+  btnFly.classList.toggle("on", flyMode);
+});
+
+const keys = new Set();
+window.addEventListener("keydown", (e) => {
+  keys.add(e.code);
+  if (e.code === "KeyF") btnFly.click();
+});
+window.addEventListener("keyup", (e) => keys.delete(e.code));
+
+// hold-drag look (desktop) — a plain click stays free to interact
+let dragging = false, lastX = 0, lastY = 0;
+let yaw = 0, pitch = 0;
+canvas.addEventListener("pointerdown", (e) => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+});
+window.addEventListener("pointerup", () => { dragging = false; });
+window.addEventListener("pointermove", (e) => {
+  if (pointerLocked) {
+    yaw -= e.movementX * 0.0022;
+    pitch -= e.movementY * 0.0022;
+    pitch = Math.max(-1.4, Math.min(1.4, pitch));
+    return;
+  }
+  if (!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  yaw -= dx * 0.0035;
+  pitch -= dy * 0.0035;
+  pitch = Math.max(-1.4, Math.min(1.4, pitch));
+});
+
+// free-look toggle: desktop -> pointer lock, mobile -> gyro
+let pointerLocked = false;
+const btnFreelook = document.getElementById("btn-freelook");
+const escHint = document.getElementById("esc-hint");
+let gyroEnabled = false;
+
+btnFreelook.addEventListener("click", async () => {
+  if (isCoarsePointer) {
+    if (!gyroEnabled) {
+      if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+        try {
+          const res = await DeviceOrientationEvent.requestPermission();
+          if (res !== "granted") return;
+        } catch { return; }
+      }
+      gyroEnabled = true;
+      btnFreelook.textContent = "Free look: ON";
+      btnFreelook.classList.add("on");
+    } else {
+      gyroEnabled = false;
+      btnFreelook.textContent = "Free look: OFF";
+      btnFreelook.classList.remove("on");
+    }
+  } else {
+    if (!pointerLocked) canvas.requestPointerLock();
+    else document.exitPointerLock();
+  }
+});
+document.addEventListener("pointerlockchange", () => {
+  pointerLocked = document.pointerLockElement === canvas;
+  btnFreelook.textContent = `Free look: ${pointerLocked ? "ON" : "OFF"}`;
+  btnFreelook.classList.toggle("on", pointerLocked);
+  escHint.classList.toggle("show", pointerLocked);
+});
+
+window.addEventListener("deviceorientation", (e) => {
+  if (!gyroEnabled || e.gamma === null) return;
+  yaw = -THREE.MathUtils.degToRad(e.alpha || 0) * 0.5;
+  pitch = Math.max(-1.4, Math.min(1.4, THREE.MathUtils.degToRad((e.beta || 0) - 90) * 0.5));
+});
+
+// mobile on-screen joystick
+const joyWrap = document.getElementById("joystick-wrap");
+const joyNub = document.getElementById("joystick-nub");
+let joyVec = { x: 0, y: 0 };
+if (isCoarsePointer) {
+  joyWrap.classList.add("show");
+  document.getElementById("controls-hint").textContent = "drag to look · joystick to fly";
+  let joyActive = false, joyId = null, joyCenter = { x: 0, y: 0 };
+  joyWrap.addEventListener("pointerdown", (e) => {
+    joyActive = true; joyId = e.pointerId;
+    const r = joyWrap.getBoundingClientRect();
+    joyCenter = { x: r.left + r.width/2, y: r.top + r.height/2 };
+    e.stopPropagation();
+  });
+  window.addEventListener("pointermove", (e) => {
+    if (!joyActive || e.pointerId !== joyId) return;
+    let dx = e.clientX - joyCenter.x, dy = e.clientY - joyCenter.y;
+    const max = 35;
+    const len = Math.hypot(dx, dy);
+    if (len > max) { dx = dx / len * max; dy = dy / len * max; }
+    joyNub.style.left = `${33 + dx}px`;
+    joyNub.style.top = `${33 + dy}px`;
+    joyVec = { x: dx / max, y: dy / max };
+  });
+  window.addEventListener("pointerup", (e) => {
+    if (e.pointerId !== joyId) return;
+    joyActive = false; joyVec = { x: 0, y: 0 };
+    joyNub.style.left = "33px"; joyNub.style.top = "33px";
+  });
+}
+
+// fade the controls hint after first input or a few seconds
+const controlsHint = document.getElementById("controls-hint");
+let hintHidden = false;
+function hideHint() { if (!hintHidden) { hintHidden = true; controlsHint.classList.add("hidden"); } }
+setTimeout(hideHint, 6000);
+canvas.addEventListener("pointerdown", hideHint, { once: true });
+
+/* ============================================================
+   Billboard labels — pooled, within ~8m only
+   ============================================================ */
+const LABEL_POOL_SIZE = 14;
+const labelPool = [];
+function makeLabelSprite() {
+  const cnv = document.createElement("canvas");
+  cnv.width = 256; cnv.height = 64;
+  const tex = new THREE.CanvasTexture(cnv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(2.6, 0.65, 1);
+  sprite.visible = false;
+  scene.add(sprite);
+  return { sprite, cnv, tex, lastWord: null };
+}
+for (let i = 0; i < LABEL_POOL_SIZE; i++) labelPool.push(makeLabelSprite());
+
+function paintLabel(entry, text) {
+  const ctx = entry.cnv.getContext("2d");
+  ctx.clearRect(0, 0, entry.cnv.width, entry.cnv.height);
+  ctx.font = "bold 34px -apple-system, sans-serif";
+  ctx.fillStyle = "rgba(180,210,255,0.95)";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, entry.cnv.width/2, entry.cnv.height/2);
+  entry.tex.needsUpdate = true;
+  entry.lastWord = text;
+}
+
+/* ============================================================
+   Resize handling (visual viewport aware — mobile URL-bar safe)
+   ============================================================ */
+function resize() {
+  const vv = window.visualViewport;
+  const w = vv ? vv.width : window.innerWidth;
+  const h = vv ? vv.height : window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+}
+window.addEventListener("resize", resize);
+window.addEventListener("orientationchange", () => setTimeout(resize, 300));
+if (window.visualViewport) window.visualViewport.addEventListener("resize", resize);
+
+/* ============================================================
+   Post-processing (flat modes only — skip in XR)
+   ============================================================ */
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.4, 0.82);
+bloom.resolution = new THREE.Vector2(window.innerWidth/2, window.innerHeight/2);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+resize();
+
+/* ============================================================
+   VR controller polling (best-effort — see status log)
+   ============================================================ */
+let flyClickPrev = false;
+let snapCooldown = 0;
+function pollVRControllers(session) {
+  let moveX = 0, moveY = 0, turnX = 0;
+  for (const src of session.inputSources) {
+    if (!src.gamepad) continue;
+    const gp = src.gamepad;
+    if (src.handedness === "left") {
+      moveX = gp.axes[2] || 0;
+      moveY = gp.axes[3] || 0;
+    } else if (src.handedness === "right") {
+      turnX = gp.axes[2] || 0;
+      const clicked = !!(gp.buttons[3] && gp.buttons[3].pressed);
+      if (clicked && !flyClickPrev) btnFly.click();
+      flyClickPrev = clicked;
+    }
+  }
+  return { moveX, moveY, turnX };
+}
+
+/* ============================================================
+   Main loop — no per-frame allocations beyond reused temporaries
+   ============================================================ */
+const _fwd = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _flat = new THREE.Vector3();
+const clock = new THREE.Clock();
+let edgeRebuildAccum = 0;
+let lastLabelSweep = 0;
+
+renderer.setAnimationLoop((time, frame) => {
+  const dt = Math.min(0.05, clock.getDelta());
+
+  if (renderer.xr.isPresenting && frame) {
+    const session = renderer.xr.getSession();
+    const { moveX, moveY, turnX } = pollVRControllers(session);
+    snapCooldown -= dt;
+    if (Math.abs(turnX) > 0.65 && snapCooldown <= 0) {
+      rig.rotation.y -= Math.sign(turnX) * (Math.PI / 6); // 30° snap-turn
+      snapCooldown = 0.35;
+    }
+    camera.getWorldDirection(_fwd);
+    if (!flyMode) _fwd.y = 0;
+    _fwd.normalize();
+    _right.crossVectors(_fwd, camera.up).normalize();
+    const speed = (Math.hypot(moveX, moveY) > 0.85 ? 2.8 : 1.4);
+    rig.position.addScaledVector(_fwd, -moveY * speed * dt);
+    rig.position.addScaledVector(_right, moveX * speed * dt);
+  } else {
+    camera.rotation.set(pitch, yaw, 0, "YXZ");
+    _fwd.set(0, 0, -1).applyEuler(camera.rotation);
+    if (!flyMode) _fwd.y = 0;
+    _fwd.normalize();
+    _right.crossVectors(_fwd, camera.up).normalize();
+
+    let mx = 0, my = 0;
+    if (keys.has("KeyW") || keys.has("ArrowUp")) my += 1;
+    if (keys.has("KeyS") || keys.has("ArrowDown")) my -= 1;
+    if (keys.has("KeyD") || keys.has("ArrowRight")) mx += 1;
+    if (keys.has("KeyA") || keys.has("ArrowLeft")) mx -= 1;
+    mx += joyVec.x; my -= joyVec.y;
+    const sprint = keys.has("ShiftLeft") || keys.has("ShiftRight") || Math.hypot(mx, my) > 0.9;
+    const speed = sprint ? 2.8 : 1.4;
+    rig.position.addScaledVector(_fwd, my * speed * dt);
+    rig.position.addScaledVector(_right, mx * speed * dt);
+    applyFlatEyeHeight();
+  }
+
+  // node flare decay + spawn/despawn animation
+  for (const n of nodeData) {
+    if (n.flare > 0) n.flare = Math.max(0, n.flare - dt * 1.6);
+    if (n.dying) {
+      n.dieT += dt;
+      n.spawnT = Math.max(0, 1 - n.dieT / 1.5);
+      if (n.dieT >= 1.5) {
+        n.alive = false; n.dying = false;
+        buildEdges();
+        setTimeout(() => { reviveSlot(n); }, 3000 + Math.random() * 1500);
+      }
+    } else if (n.spawnT < 1) {
+      n.spawnT = Math.min(1, n.spawnT + dt * 0.8);
+      if (n.spawnT >= 1 && !n._edgesBuilt) { n._edgesBuilt = true; buildEdges(); }
+    }
+    if (n.alive && n.spawnT < 1 && n.dieT === 0) n._edgesBuilt = false;
+  }
+
+  // LOD: tag far nodes so refreshInstances() hides their sphere and only
+  // the point-sprite stand-in (below) renders for them
+  let farCount = 0;
+  const camPos = rig.position;
+  for (const n of nodeData) {
+    if (!n.alive) { n.isFar = false; continue; }
+    const d = camPos.distanceTo(n.pos);
+    n.isFar = d > LOD_DIST;
+    if (n.isFar) {
+      farPositions[farCount*3] = n.pos.x; farPositions[farCount*3+1] = n.pos.y; farPositions[farCount*3+2] = n.pos.z;
+      const farMult = Math.min(0.9, n.intensity * 0.4);
+      farColors[farCount*3] = n.baseColor.r * farMult;
+      farColors[farCount*3+1] = n.baseColor.g * farMult;
+      farColors[farCount*3+2] = n.baseColor.b * farMult;
+      farCount++;
+    }
+  }
+  farGeo.setDrawRange(0, farCount);
+  farGeo.attributes.position.needsUpdate = true;
+  farGeo.attributes.color.needsUpdate = true;
+
+  refreshInstances();
+
+  // pulses
+  let pulseInstanceCount = 0;
+  for (const p of pulses) {
+    if (!p.active) continue;
+    p.t += dt * p.speed;
+    if (p.t >= 1) { p.active = false; continue; }
+    const a = nodeData[p.from].pos, b = nodeData[p.to].pos;
+    _pv.lerpVectors(a, b, p.t);
+    tmpObj.position.copy(_pv);
+    const s = p.replay ? 0.16 : 0.24;
+    tmpObj.scale.setScalar(s);
+    tmpObj.rotation.set(0,0,0);
+    tmpObj.updateMatrix();
+    pulseMesh.setMatrixAt(pulseInstanceCount, tmpObj.matrix);
+    pulseMesh.setColorAt(pulseInstanceCount, p.color);
+    pulseInstanceCount++;
+  }
+  for (let i = pulseInstanceCount; i < MAX_PULSES; i++) {
+    tmpObj.position.set(0, -9999, 0);
+    tmpObj.scale.setScalar(0.0001);
+    tmpObj.updateMatrix();
+    pulseMesh.setMatrixAt(i, tmpObj.matrix);
+  }
+  pulseMesh.instanceMatrix.needsUpdate = true;
+  if (pulseMesh.instanceColor) pulseMesh.instanceColor.needsUpdate = true;
+
+  // pooled billboard labels within ~8m
+  if (time - lastLabelSweep > 200) {
+    lastLabelSweep = time;
+    const near = nodeData
+      .filter((n) => n.alive && camPos.distanceTo(n.pos) < LABEL_DIST)
+      .sort((a, b) => camPos.distanceTo(a.pos) - camPos.distanceTo(b.pos))
+      .slice(0, LABEL_POOL_SIZE);
+    for (let i = 0; i < LABEL_POOL_SIZE; i++) {
+      const entry = labelPool[i];
+      const n = near[i];
+      if (!n) { entry.sprite.visible = false; continue; }
+      entry.sprite.visible = true;
+      entry.sprite.position.copy(n.pos).add(new THREE.Vector3(0, 1.1 * n.scale + 0.4, 0));
+      if (entry.lastWord !== n.word) paintLabel(entry, n.word);
+    }
+  }
+
+  edgeRebuildAccum += dt;
+
+  if (renderer.xr.isPresenting) {
+    renderer.render(scene, camera);
+  } else {
+    composer.render();
+  }
+});
+
+initNodes();
+setInterval(erlangBeat, ERLANG_INTERVAL);
+window.__wm = { scene, camera, renderer, nodeMesh, nodeData, rig, composer, edgeLines, THREE };
+</script>
+</body>
+</html>
