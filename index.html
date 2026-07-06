@@ -92,6 +92,20 @@
     left: 33px; top: 33px; background: rgba(125,224,255,0.55); border: 1px solid rgba(200,240,255,0.7);
   }
 
+  #vert-wrap {
+    position: fixed; right: 20px; bottom: 20px; width: 64px; height: 148px;
+    display: none; flex-direction: column; justify-content: space-between; align-items: center;
+    pointer-events: auto; z-index: 11;
+  }
+  #vert-wrap.show { display: flex; }
+  .vert-btn {
+    width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: rgba(20,26,46,0.5); border: 1px solid rgba(140,170,255,0.35);
+    color: #cdd9ff; font-size: 22px; line-height: 1; user-select: none; -webkit-user-select: none;
+    touch-action: none;
+  }
+  .vert-btn.active { background: rgba(60,120,200,0.4); border-color: #7de0ff; color: #7de0ff; }
+
   #node-info {
     top: 60px; left: 16px; max-width: 240px; font-size: 12px;
     background: rgba(6,9,18,0.65); border: 1px solid rgba(140,170,255,0.25);
@@ -134,8 +148,9 @@
   </div>
 </div>
 
-<div class="panel" id="controls-hint">hold-drag to look · WASD to fly · F to toggle fly/walk</div>
+<div class="panel" id="controls-hint">hold-drag to look · WASD to fly · Space/Ctrl to rise/dive · F to toggle fly/walk</div>
 <div id="joystick-wrap"><div id="joystick-base"></div><div id="joystick-nub"></div></div>
+<div id="vert-wrap"><button class="vert-btn" id="btn-up">&#9650;</button><button class="vert-btn" id="btn-down">&#9660;</button></div>
 
 <script type="importmap">
 {
@@ -649,6 +664,9 @@ const keys = new Set();
 window.addEventListener("keydown", (e) => {
   keys.add(e.code);
   if (e.code === "KeyF") btnFly.click();
+  // Space/Ctrl drive vertical fly — stop Space from scrolling the page or
+  // re-clicking whatever HUD button last had focus
+  if (e.code === "Space" || e.code === "ControlLeft" || e.code === "ControlRight") e.preventDefault();
 });
 window.addEventListener("keyup", (e) => keys.delete(e.code));
 
@@ -679,6 +697,11 @@ let pointerLocked = false;
 const btnFreelook = document.getElementById("btn-freelook");
 const escHint = document.getElementById("esc-hint");
 let gyroEnabled = false;
+// gyro drives yaw/pitch as a DELTA from wherever look was when enabled, not
+// as an absolute compass/tilt reading — using the raw absolute angles snapped
+// the view to an unrelated orientation the instant free-look was toggled on,
+// and compass heading (alpha) drifts independently of how far you've turned.
+let gyroBaseAlpha = null, gyroBaseBeta = null, gyroYawBase = 0, gyroPitchBase = 0;
 
 btnFreelook.addEventListener("click", async () => {
   if (isCoarsePointer) {
@@ -690,6 +713,8 @@ btnFreelook.addEventListener("click", async () => {
         } catch { return; }
       }
       gyroEnabled = true;
+      gyroBaseAlpha = null; // next deviceorientation event just calibrates, no snap
+      gyroBaseBeta = null;
       btnFreelook.textContent = "Free look: ON";
       btnFreelook.classList.add("on");
     } else {
@@ -710,15 +735,26 @@ document.addEventListener("pointerlockchange", () => {
 });
 
 window.addEventListener("deviceorientation", (e) => {
-  if (!gyroEnabled || e.gamma === null) return;
-  yaw = -THREE.MathUtils.degToRad(e.alpha || 0) * 0.5;
-  pitch = Math.max(-1.4, Math.min(1.4, THREE.MathUtils.degToRad((e.beta || 0) - 90) * 0.5));
+  if (!gyroEnabled || e.alpha === null || e.beta === null) return;
+  if (gyroBaseAlpha === null) {
+    // first sample after enabling: record the baseline, don't move the view yet
+    gyroBaseAlpha = e.alpha; gyroBaseBeta = e.beta;
+    gyroYawBase = yaw; gyroPitchBase = pitch;
+    return;
+  }
+  let dAlpha = e.alpha - gyroBaseAlpha;
+  if (dAlpha > 180) dAlpha -= 360; // alpha wraps 0..360 (compass heading)
+  if (dAlpha < -180) dAlpha += 360;
+  const dBeta = e.beta - gyroBaseBeta;
+  yaw = gyroYawBase - THREE.MathUtils.degToRad(dAlpha);
+  pitch = Math.max(-1.4, Math.min(1.4, gyroPitchBase + THREE.MathUtils.degToRad(dBeta)));
 });
 
 // mobile on-screen joystick
 const joyWrap = document.getElementById("joystick-wrap");
 const joyNub = document.getElementById("joystick-nub");
 let joyVec = { x: 0, y: 0 };
+let mobileVertical = 0; // -1/0/1 from the on-screen ascend/descend buttons
 if (isCoarsePointer) {
   joyWrap.classList.add("show");
   document.getElementById("controls-hint").textContent = "drag to look · joystick to fly";
@@ -744,6 +780,25 @@ if (isCoarsePointer) {
     joyActive = false; joyVec = { x: 0, y: 0 };
     joyNub.style.left = "33px"; joyNub.style.top = "33px";
   });
+
+  // dedicated vertical (ascend/descend) buttons — mobile has no clean way to
+  // fly straight up/down otherwise, since pitch is tied to look direction
+  const vertWrap = document.getElementById("vert-wrap");
+  vertWrap.classList.add("show");
+  const btnUp = document.getElementById("btn-up");
+  const btnDown = document.getElementById("btn-down");
+  const setVertical = (btn, v) => (e) => {
+    e.stopPropagation();
+    mobileVertical = v;
+    btnUp.classList.toggle("active", v > 0);
+    btnDown.classList.toggle("active", v < 0);
+  };
+  btnUp.addEventListener("pointerdown", setVertical(btnUp, 1));
+  btnDown.addEventListener("pointerdown", setVertical(btnDown, -1));
+  ["pointerup", "pointercancel", "pointerleave"].forEach((evt) => {
+    btnUp.addEventListener(evt, setVertical(btnUp, 0));
+    btnDown.addEventListener(evt, setVertical(btnDown, 0));
+  });
 }
 
 // fade the controls hint after first input or a few seconds
@@ -754,23 +809,26 @@ setTimeout(hideHint, 6000);
 canvas.addEventListener("pointerdown", hideHint, { once: true });
 
 /* ============================================================
-   Billboard labels — pooled, within ~8m only
+   Billboard labels
+   - top ~20 words by volume: persistent, always visible, scale/fade with range
+   - everything else: proximity-only, within ~8m (existing behavior)
+   Both pools are fixed-size and pooled — no per-frame allocations.
    ============================================================ */
 const LABEL_POOL_SIZE = 14;
 const labelPool = [];
-function makeLabelSprite() {
+function makeLabelSprite(canvasW, canvasH, baseScaleX, baseScaleY) {
   const cnv = document.createElement("canvas");
-  cnv.width = 256; cnv.height = 64;
+  cnv.width = canvasW; cnv.height = canvasH;
   const tex = new THREE.CanvasTexture(cnv);
   tex.colorSpace = THREE.SRGBColorSpace;
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
   const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(2.6, 0.65, 1);
+  sprite.scale.set(baseScaleX, baseScaleY, 1);
   sprite.visible = false;
   scene.add(sprite);
-  return { sprite, cnv, tex, lastWord: null };
+  return { sprite, cnv, tex, lastWord: null, baseScaleX, baseScaleY };
 }
-for (let i = 0; i < LABEL_POOL_SIZE; i++) labelPool.push(makeLabelSprite());
+for (let i = 0; i < LABEL_POOL_SIZE; i++) labelPool.push(makeLabelSprite(256, 64, 2.6, 0.65));
 
 function paintLabel(entry, text) {
   const ctx = entry.cnv.getContext("2d");
@@ -782,6 +840,67 @@ function paintLabel(entry, text) {
   ctx.fillText(text, entry.cnv.width/2, entry.cnv.height/2);
   entry.tex.needsUpdate = true;
   entry.lastWord = text;
+}
+
+/* ---- persistent top-word labels (main nodes, legible across the mesh) ---- */
+const TOP_LABEL_COUNT = 20;
+const TOP_LABEL_RECOMPUTE_MS = 2500;
+const topLabelPool = [];
+for (let i = 0; i < TOP_LABEL_COUNT; i++) topLabelPool.push(makeLabelSprite(320, 88, 4.4, 1.21));
+
+function paintTopLabel(entry, text, hexColor) {
+  const ctx = entry.cnv.getContext("2d");
+  const w = entry.cnv.width, h = entry.cnv.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.font = "700 40px -apple-system, sans-serif";
+  const metrics = ctx.measureText(text);
+  const pillW = Math.min(w - 8, metrics.width + 64);
+  const pillX = (w - pillW) / 2;
+  ctx.fillStyle = "rgba(6,10,20,0.55)";
+  ctx.beginPath();
+  ctx.roundRect(pillX, 14, pillW, h - 28, (h - 28) / 2);
+  ctx.fill();
+  // small dot tinting the pill to the node's own color, for quick visual grouping
+  ctx.fillStyle = hexColor;
+  ctx.beginPath();
+  ctx.arc(pillX + 22, h / 2, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#eaf6ff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.shadowColor = hexColor;
+  ctx.shadowBlur = 10;
+  ctx.fillText(text, w / 2 + 14, h / 2 + 1);
+  entry.tex.needsUpdate = true;
+  entry.lastWord = text;
+}
+
+function smoothstep01(edge0, edge1, x) {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+// recomputed periodically (not per frame) — sorts by volume24h and assigns
+// the highest-volume alive nodes to the persistent pool. n.isTopWord lets the
+// proximity system below skip nodes that already have a persistent label.
+let lastTopRecompute = -Infinity;
+function updateTopWords(time) {
+  if (time - lastTopRecompute < TOP_LABEL_RECOMPUTE_MS) return;
+  lastTopRecompute = time;
+  for (const n of nodeData) n.isTopWord = false;
+  const ranked = nodeData
+    .filter((n) => n.alive)
+    .sort((a, b) => b.volume24h - a.volume24h)
+    .slice(0, TOP_LABEL_COUNT);
+  for (let i = 0; i < TOP_LABEL_COUNT; i++) {
+    const entry = topLabelPool[i];
+    const n = ranked[i];
+    entry.nodeIndex = n ? n.index : -1;
+    if (n) n.isTopWord = true;
+    if (n && entry.lastWord !== n.word) {
+      paintTopLabel(entry, n.word, "#" + n.baseColor.getHexString());
+    }
+  }
 }
 
 /* ============================================================
@@ -840,12 +959,26 @@ function pollVRControllers(session) {
 const _fwd = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _flat = new THREE.Vector3();
+const velocity = new THREE.Vector3();   // current smoothed velocity (units/sec), reused every frame
+const _targetVel = new THREE.Vector3(); // scratch, reused every frame
+const _labelOffset = new THREE.Vector3(); // scratch, reused every frame
 const clock = new THREE.Clock();
 let edgeRebuildAccum = 0;
 let lastLabelSweep = 0;
 
+// Tuned for "glide through a constellation": fast enough to cross the ~120-unit
+// field in well under a minute, smoothed so input reads as momentum rather than
+// an instant on/off snap.
+const MOVE_SPEED = 5.0;
+const SPRINT_SPEED = 11.0;
+const VR_MOVE_SPEED = 3.6;   // gentler in-headset per XR comfort norms
+const VR_SPRINT_SPEED = 7.5;
+const STICK_DEADZONE = 0.12;
+const VELOCITY_SMOOTH_TIME = 0.15; // seconds; lower = snappier, higher = floatier
+
 renderer.setAnimationLoop((time, frame) => {
   const dt = Math.min(0.05, clock.getDelta());
+  const smooth = 1 - Math.exp(-dt / VELOCITY_SMOOTH_TIME); // frame-rate-independent damping factor
 
   if (renderer.xr.isPresenting && frame) {
     const session = renderer.xr.getSession();
@@ -859,9 +992,14 @@ renderer.setAnimationLoop((time, frame) => {
     if (!flyMode) _fwd.y = 0;
     _fwd.normalize();
     _right.crossVectors(_fwd, camera.up).normalize();
-    const speed = (Math.hypot(moveX, moveY) > 0.85 ? 2.8 : 1.4);
-    rig.position.addScaledVector(_fwd, -moveY * speed * dt);
-    rig.position.addScaledVector(_right, moveX * speed * dt);
+
+    let mx = moveX, my = -moveY;
+    const mlen = Math.hypot(mx, my);
+    if (mlen > 1) { mx /= mlen; my /= mlen; }
+    const speed = mlen > 0.85 ? VR_SPRINT_SPEED : VR_MOVE_SPEED;
+    _targetVel.set(0, 0, 0).addScaledVector(_fwd, my * speed).addScaledVector(_right, mx * speed);
+    velocity.lerp(_targetVel, smooth);
+    rig.position.addScaledVector(velocity, dt);
   } else {
     camera.rotation.set(pitch, yaw, 0, "YXZ");
     _fwd.set(0, 0, -1).applyEuler(camera.rotation);
@@ -874,11 +1012,39 @@ renderer.setAnimationLoop((time, frame) => {
     if (keys.has("KeyS") || keys.has("ArrowDown")) my -= 1;
     if (keys.has("KeyD") || keys.has("ArrowRight")) mx += 1;
     if (keys.has("KeyA") || keys.has("ArrowLeft")) mx -= 1;
-    mx += joyVec.x; my -= joyVec.y;
-    const sprint = keys.has("ShiftLeft") || keys.has("ShiftRight") || Math.hypot(mx, my) > 0.9;
-    const speed = sprint ? 2.8 : 1.4;
-    rig.position.addScaledVector(_fwd, my * speed * dt);
-    rig.position.addScaledVector(_right, mx * speed * dt);
+
+    // analog stick: deadzone + quadratic ease-in, applied radially (not per-axis)
+    // so diagonal deflection isn't distorted
+    const jmag = Math.hypot(joyVec.x, joyVec.y);
+    if (jmag > STICK_DEADZONE) {
+      const t = Math.min(1, (jmag - STICK_DEADZONE) / (1 - STICK_DEADZONE));
+      const eased = (t * t) / jmag;
+      mx += joyVec.x * eased;
+      my -= joyVec.y * eased;
+    }
+    // clamp combined input to unit magnitude — digital WASD diagonals used to
+    // move at sqrt(2)x speed since forward+strafe were added independently
+    const mlen = Math.hypot(mx, my);
+    if (mlen > 1) { mx /= mlen; my /= mlen; }
+
+    let vy = 0;
+    if (flyMode) {
+      if (keys.has("Space")) vy += 1;
+      if (keys.has("ControlLeft") || keys.has("ControlRight")) vy -= 1;
+      vy += mobileVertical;
+    }
+    vy = Math.max(-1, Math.min(1, vy));
+
+    const sprint = keys.has("ShiftLeft") || keys.has("ShiftRight") || jmag > 0.9;
+    const speed = sprint ? SPRINT_SPEED : MOVE_SPEED;
+
+    _targetVel.set(0, 0, 0)
+      .addScaledVector(_fwd, my * speed)
+      .addScaledVector(_right, mx * speed);
+    _targetVel.y += vy * speed;
+
+    velocity.lerp(_targetVel, smooth);
+    rig.position.addScaledVector(velocity, dt);
     applyFlatEyeHeight();
   }
 
@@ -949,11 +1115,32 @@ renderer.setAnimationLoop((time, frame) => {
   pulseMesh.instanceMatrix.needsUpdate = true;
   if (pulseMesh.instanceColor) pulseMesh.instanceColor.needsUpdate = true;
 
-  // pooled billboard labels within ~8m
+  // persistent labels for the top-volume words — recomputed periodically,
+  // but repositioned/rescaled every frame so they track the camera smoothly
+  updateTopWords(time);
+  for (let i = 0; i < TOP_LABEL_COUNT; i++) {
+    const entry = topLabelPool[i];
+    const n = entry.nodeIndex >= 0 ? nodeData[entry.nodeIndex] : null;
+    if (!n || !n.alive) { entry.sprite.visible = false; continue; }
+    const dist = camPos.distanceTo(n.pos);
+    // scale up with distance (counteracts perspective shrink) so it stays
+    // legible from across the mesh, clamped so it doesn't balloon or vanish
+    const distMul = Math.min(2.6, Math.max(0.7, dist / 18));
+    const opacity = smoothstep01(2, 6, dist) * (1 - smoothstep01(85, 120, dist));
+    if (opacity <= 0.01) { entry.sprite.visible = false; continue; }
+    entry.sprite.visible = true;
+    entry.sprite.material.opacity = opacity;
+    entry.sprite.scale.set(entry.baseScaleX * distMul, entry.baseScaleY * distMul, 1);
+    _labelOffset.set(0, 1.3 * n.scale + 0.55, 0);
+    entry.sprite.position.copy(n.pos).add(_labelOffset);
+  }
+
+  // pooled billboard labels within ~8m, for everything that isn't already
+  // a persistent top-word label
   if (time - lastLabelSweep > 200) {
     lastLabelSweep = time;
     const near = nodeData
-      .filter((n) => n.alive && camPos.distanceTo(n.pos) < LABEL_DIST)
+      .filter((n) => n.alive && !n.isTopWord && camPos.distanceTo(n.pos) < LABEL_DIST)
       .sort((a, b) => camPos.distanceTo(a.pos) - camPos.distanceTo(b.pos))
       .slice(0, LABEL_POOL_SIZE);
     for (let i = 0; i < LABEL_POOL_SIZE; i++) {
@@ -961,7 +1148,9 @@ renderer.setAnimationLoop((time, frame) => {
       const n = near[i];
       if (!n) { entry.sprite.visible = false; continue; }
       entry.sprite.visible = true;
-      entry.sprite.position.copy(n.pos).add(new THREE.Vector3(0, 1.1 * n.scale + 0.4, 0));
+      entry.sprite.material.opacity = 1;
+      _labelOffset.set(0, 1.1 * n.scale + 0.4, 0);
+      entry.sprite.position.copy(n.pos).add(_labelOffset);
       if (entry.lastWord !== n.word) paintLabel(entry, n.word);
     }
   }
