@@ -594,6 +594,17 @@ nodeMat.onBeforeCompile = (shader) => {
 };
 const nodeMesh = new THREE.InstancedMesh(nodeGeo, nodeMat, NODE_COUNT);
 nodeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+// Three caches an InstancedMesh's bounding sphere the first time it frustum-
+// checks it and never recomputes it as instance matrices change. Every
+// instance is parked far off-screen below until real data lands, so that
+// first check bakes in a degenerate sphere at (0,-9999,0) and the whole mesh
+// is culled forever after. Mock never hit this (its nodes are built before
+// the first render); live builds after an async fetch, so it always did.
+// Node positions also move at runtime (reviveSlot), so a one-shot
+// computeBoundingSphere() after build would go stale too — this mesh is the
+// scene's centrepiece and effectively always on screen, so culling one draw
+// call buys nothing. Same reasoning for pulseMesh and farPoints below.
+nodeMesh.frustumCulled = false;
 scene.add(nodeMesh);
 // hide every instance up front — a freshly-created InstancedMesh defaults
 // every unset instance matrix to identity (visible, at the origin), which
@@ -622,6 +633,10 @@ const farMat = new THREE.PointsMaterial({
   depthWrite: false, sizeAttenuation: true,
 });
 const farPoints = new THREE.Points(farGeo, farMat);
+// same stale-bounds trap as nodeMesh: farGeo's positions are rewritten every
+// frame, and in live mode no node starts far, so its first cached bounding
+// sphere is a zero-radius one at the origin — the LOD dots would never draw
+farPoints.frustumCulled = false;
 scene.add(farPoints);
 
 const nodeData = [];
@@ -728,7 +743,24 @@ function buildNodesFromSnapshot(snap) {
       if (d > maxR) maxR = d;
     }
     const avgR = sum / nodeData.length;
-    rig.position.z = Math.max(8, Math.min(avgR * 0.65, maxR - 3, 40));
+    let z = Math.max(8, Math.min(avgR * 0.65, maxR - 3, 40));
+    // "amid the cloud" must not mean "inside a node": nodes are placed at
+    // random, so the framing distance above can drop the rig within a radius
+    // of one, which fills the whole viewport with a single sphere. Back off
+    // until the nearest node centre clears CAM_CLEARANCE (a node's world
+    // radius peaks near 1.07, so this keeps the largest one under ~a third
+    // of the viewport), capped so we never retreat outside the cloud.
+    const CAM_CLEARANCE = 8;
+    const zCap = maxR + CAM_CLEARANCE;
+    const _camAt = new THREE.Vector3();
+    for (let guard = 0; guard < 32 && z < zCap; guard++) {
+      _camAt.set(rig.position.x, rig.position.y + EYE_HEIGHT, z);
+      let dMin = Infinity;
+      for (const n of nodeData) dMin = Math.min(dMin, _camAt.distanceTo(n.pos));
+      if (dMin >= CAM_CLEARANCE) break;
+      z += CAM_CLEARANCE - dMin + 0.5;
+    }
+    rig.position.z = Math.min(z, zCap);
   }
   refreshInstances();
   buildEdges();
@@ -852,6 +884,9 @@ const pulseGeo = new THREE.SphereGeometry(1, 6, 6);
 const pulseMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending });
 const pulseMesh = new THREE.InstancedMesh(pulseGeo, pulseMat, MAX_PULSES);
 pulseMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+// pulses are parked hidden until a trade fires, so they bake the same
+// degenerate bounding sphere and never render in live mode (see nodeMesh)
+pulseMesh.frustumCulled = false;
 scene.add(pulseMesh);
 const pulses = []; // {from, to, t, speed, color, replay}
 for (let i = 0; i < MAX_PULSES; i++) pulses.push({ active: false });
