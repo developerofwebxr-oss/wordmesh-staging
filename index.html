@@ -2295,10 +2295,14 @@ function labelOccluded(n, camPos) {
     const blockR = m.scale * 0.55;
     _occToOther.copy(m.pos).sub(camPos);
     const along = _occToOther.dot(_occDir);
-    // must lie strictly between the camera and our node to block it
-    if (along <= blockR || along >= distToNode - ownR * 0.25) continue;
+    // blocker's centre must lie between the camera and our node's centre
+    if (along <= 0 || along >= distToNode) continue;
     const perpSq = _occToOther.lengthSq() - along * along;
-    if (perpSq < blockR * blockR * 0.81) return true; // 0.9r: ignore grazing edges
+    // Exactly the sphere the pick ray would hit: any tolerance here (an
+    // earlier 0.9r "ignore grazing edges") leaves a band where the blocker
+    // still covers our node's centre pixel, so the label stays up while a tap
+    // through it selects the blocker — the wrong-card-for-the-word symptom.
+    if (perpSq < blockR * blockR) return true;
   }
   return false;
 }
