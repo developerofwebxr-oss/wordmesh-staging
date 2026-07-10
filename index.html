@@ -83,6 +83,10 @@
   #joystick-wrap {
     position: fixed; left: 20px; bottom: 20px; width: 110px; height: 110px;
     display: none; pointer-events: auto; z-index: 11;
+    /* own the drag gesture — without this, Android Chrome can interpret a
+       thumb-drag on the stick as a scroll/pan, fire pointercancel mid-drag,
+       and the joystick stops tracking (a second reason movement "didn't work") */
+    touch-action: none;
   }
   #joystick-wrap.show { display: block; }
   #joystick-base {
@@ -1163,7 +1167,14 @@ btnAR.addEventListener("click", () => enterXR("immersive-ar"));
 /* ============================================================
    Locomotion — desktop / mobile / VR (unified fly-by-default)
    ============================================================ */
-const isCoarsePointer = matchMedia("(pointer: coarse) and (not (pointer: fine))").matches;
+// Touch-capable device? The old `(pointer: coarse) and (not (pointer: fine))`
+// query hid the joystick + vertical buttons on Android phones that ALSO report
+// a fine pointer (stylus/S-Pen support, a paired mouse, or Chrome's pointer
+// heuristics) — those users could look (drag isn't gated) but could never
+// move. maxTouchPoints is the reliable "has touch" signal; keep coarse as a
+// fallback for touch devices that under-report it. Desktop (0 touch points,
+// fine-only) stays false, so mouse-fly / WASD is unchanged.
+const isCoarsePointer = (navigator.maxTouchPoints || 0) > 0 || matchMedia("(pointer: coarse)").matches;
 let flyMode = true;
 const btnFly = document.getElementById("btn-fly");
 btnFly.addEventListener("click", () => {
@@ -1431,7 +1442,7 @@ function makeLabelSprite() {
   const sprite = new THREE.Sprite(mat);
   sprite.visible = false;
   scene.add(sprite);
-  return { sprite, cnv, tex, lastWord: null, lastHex: null, nodeIndex: -1, baseW: 1, baseH: 1, textW: 0, dotSpace: 0 };
+  return { sprite, cnv, tex, texW: 0, texH: 0, lastWord: null, lastHex: null, nodeIndex: -1, baseW: 1, baseH: 1, textW: 0, dotSpace: 0 };
 }
 for (let i = 0; i < LABEL_TOP_K + 1; i++) labelPool.push(makeLabelSprite());
 
@@ -1473,7 +1484,25 @@ function paintLabelAutoFit(entry, word, hexColor) {
   ctx.globalAlpha = 0.85;
   ctx.fillRect(textX, h - LABEL_PAD_Y * 0.7, textW, Math.max(2, 2 * LABEL_DPR));
   ctx.globalAlpha = 1;
-  entry.tex.needsUpdate = true;
+  // Resizing a canvas that already backs a GPU texture makes three re-upload
+  // it via texSubImage2D against the OLD (smaller) storage — "glCopySubTexture:
+  // Offset overflows texture dimensions", the upload is REJECTED, and the
+  // sprite keeps its PREVIOUS glyphs even though it has already been rebound to
+  // a new node. That is the doubled / detached / mashed-text seen during
+  // movement: the near-label set rebinds every 350ms, each rebind refits the
+  // text and resizes this canvas. (Measured: 3 of 5 texSubImage2D calls errored
+  // from a canvas source; texImage2D never ran.) When the size changes, give
+  // the canvas a FRESH texture so three does a full texImage2D allocation.
+  if (w !== entry.texW || h !== entry.texH) {
+    entry.tex.dispose();
+    entry.tex = new THREE.CanvasTexture(entry.cnv);
+    entry.tex.colorSpace = THREE.SRGBColorSpace;
+    entry.sprite.material.map = entry.tex;
+    entry.sprite.material.needsUpdate = true;
+    entry.texW = w; entry.texH = h;
+  } else {
+    entry.tex.needsUpdate = true;
+  }
   entry.lastWord = word;
   entry.lastHex = hexColor;
   const aspect = w / h;
