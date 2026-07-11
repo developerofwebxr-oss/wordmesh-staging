@@ -1321,7 +1321,13 @@ window.addEventListener("deviceorientation", (e) => {
   if (dAlpha > 180) dAlpha -= 360; // alpha wraps 0..360 (compass heading)
   if (dAlpha < -180) dAlpha += 360;
   const dBeta = e.beta - gyroBaseBeta;
-  yaw = gyroYawBase - THREE.MathUtils.degToRad(dAlpha);
+  // alpha follows the right-hand rule about the world-up axis: turning the
+  // phone right (clockwise seen from above) DECREASES alpha, and a rightward
+  // turn must DECREASE yaw (yaw>0 turns the view left under the YXZ euler
+  // below). The sign here was negated, so the view tracked the opposite way —
+  // turn right, look left. Add dAlpha so a right turn (dAlpha<0) looks right.
+  // (pitch was already correct: tilting the top away raises beta and looks up.)
+  yaw = gyroYawBase + THREE.MathUtils.degToRad(dAlpha);
   pitch = Math.max(-1.4, Math.min(1.4, gyroPitchBase + THREE.MathUtils.degToRad(dBeta)));
 });
 
