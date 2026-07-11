@@ -80,6 +80,17 @@
   }
   #esc-hint.show { display: block; }
 
+  /* AR exit — lives OUTSIDE #hud (which is display:none in XR), so it's the
+     one reliably-visible control in the AR dom-overlay. Shown only in AR. */
+  #btn-exit-xr {
+    position: fixed; top: 16px; right: 16px; z-index: 12; display: none;
+    padding: 10px 16px; border-radius: 20px; font: 600 13px/1 -apple-system, sans-serif;
+    color: #eaf6ff; background: rgba(6,9,18,0.72); border: 1px solid rgba(140,170,255,0.5);
+    pointer-events: auto; touch-action: manipulation; -webkit-user-select: none; user-select: none;
+    padding-top: calc(10px + env(safe-area-inset-top)); backdrop-filter: blur(6px);
+  }
+  #btn-exit-xr.show { display: block; }
+
   #joystick-wrap {
     position: fixed; left: 20px; bottom: 20px; width: 110px; height: 110px;
     display: none; pointer-events: auto; z-index: 11;
@@ -148,6 +159,7 @@
 <div class="panel" id="controls-hint">hold-drag to look · WASD to fly · Space/Ctrl to rise/dive · F to toggle fly/walk</div>
 <div id="joystick-wrap"><div id="joystick-base"></div><div id="joystick-nub"></div></div>
 <div id="vert-wrap"><button class="vert-btn" id="btn-up">&#9650;</button><button class="vert-btn" id="btn-down">&#9660;</button></div>
+<button id="btn-exit-xr">Exit AR</button>
 
 <script type="importmap">
 {
@@ -1141,6 +1153,9 @@ async function enterXR(mode) {
       // shell entirely so the real world shows through (shell-off in AR).
       scene.background = null;
       scene.fog = null;
+      // the whole #hud (incl. the Screen/exit mode-switcher) is display:none in
+      // XR, so surface the standalone exit button in the AR dom-overlay
+      btnExitXR.classList.add("show");
     }
     session.addEventListener("end", onXRSessionEnd);
   } catch (err) {
@@ -1150,6 +1165,7 @@ async function enterXR(mode) {
 function onXRSessionEnd() {
   currentSession = null;
   hud.classList.remove("in-xr");
+  btnExitXR.classList.remove("show");
   applyStatusVisibility(); // back to screen mode: chip off, badge only if noteworthy
   [btnFlat, btnVR, btnAR].forEach((b) => b.classList.remove("active"));
   btnFlat.classList.add("active");
@@ -1162,6 +1178,8 @@ renderer.xr.addEventListener("sessionend", onXRSessionEnd);
 btnFlat.addEventListener("click", () => { if (currentSession) currentSession.end(); });
 btnVR.addEventListener("click", () => enterXR("immersive-vr"));
 btnAR.addEventListener("click", () => enterXR("immersive-ar"));
+const btnExitXR = document.getElementById("btn-exit-xr");
+btnExitXR.addEventListener("click", () => { if (currentSession) currentSession.end(); });
 
 /* ============================================================
    Locomotion — desktop / mobile / VR (unified fly-by-default)
@@ -2146,18 +2164,40 @@ const TELEPORT_DURATION = 1.0;
 let teleportAnim = null; // { from, to, t, node } — visible ease-in-out dolly
 const _teleportDir = new THREE.Vector3();
 function computeTeleportTarget(n) {
+  // Full 3D: stop TELEPORT_FRAMING_DIST from the node along the line from the
+  // node back toward wherever the camera currently is — so you approach from
+  // your own side and arrive right in front of it, whether it's above, below,
+  // or behind. (Previously y was zeroed and the height was locked to the
+  // camera's, so a node far above/below left you at its horizontal position
+  // but your original altitude — "flew to the area, not the node".)
   _teleportDir.subVectors(rig.position, n.pos);
-  _teleportDir.y = 0;
   if (_teleportDir.lengthSq() < 1e-6) _teleportDir.set(0, 0, 1);
   _teleportDir.normalize();
-  const target = n.pos.clone().addScaledVector(_teleportDir, TELEPORT_FRAMING_DIST);
-  target.y = rig.position.y; // stay at the same floor height, don't teleport vertically
-  return target;
+  return n.pos.clone().addScaledVector(_teleportDir, TELEPORT_FRAMING_DIST);
+}
+// Yaw/pitch that make the YXZ-euler camera at `fromPos` look at `toPos`
+// (matches camera.rotation.set(pitch, yaw, 0, "YXZ") in the flat branch).
+function lookAnglesTo(fromPos, toPos) {
+  const dx = toPos.x - fromPos.x, dy = toPos.y - fromPos.y, dz = toPos.z - fromPos.z;
+  const len = Math.hypot(dx, dy, dz) || 1;
+  const nx = dx / len, ny = dy / len, nz = dz / len;
+  return {
+    yaw: Math.atan2(-nx, -nz),
+    pitch: Math.max(-1.4, Math.min(1.4, Math.asin(Math.max(-1, Math.min(1, ny))))),
+  };
 }
 function selectSearchResult(n) {
   closeSearch();
   const target = computeTeleportTarget(n);
-  teleportAnim = { from: rig.position.clone(), to: target, t: 0, node: n };
+  const look = lookAnglesTo(target, n.pos);
+  // shortest-path yaw so a node behind you turns the near way, not 350° around
+  let toYaw = look.yaw;
+  while (toYaw - yaw > Math.PI) toYaw -= 2 * Math.PI;
+  while (toYaw - yaw < -Math.PI) toYaw += 2 * Math.PI;
+  teleportAnim = {
+    from: rig.position.clone(), to: target, t: 0, node: n,
+    fromYaw: yaw, toYaw, fromPitch: pitch, toPitch: look.pitch,
+  };
 }
 
 // ---- unified selection dispatch — search button/keyboard/match-list take
@@ -2320,6 +2360,11 @@ renderer.setAnimationLoop((time, frame) => {
     const raw = Math.min(1, teleportAnim.t);
     const eased = raw < 0.5 ? 4 * raw * raw * raw : 1 - Math.pow(-2 * raw + 2, 3) / 2; // easeInOutCubic
     rig.position.lerpVectors(teleportAnim.from, teleportAnim.to, eased);
+    // turn to face the node as we fly (flat-mode look; in XR the device pose
+    // owns orientation, so these are simply unused there). yaw covers behind-us
+    // targets, pitch covers far-above/below ones.
+    yaw = teleportAnim.fromYaw + (teleportAnim.toYaw - teleportAnim.fromYaw) * eased;
+    pitch = teleportAnim.fromPitch + (teleportAnim.toPitch - teleportAnim.fromPitch) * eased;
     if (raw >= 1) {
       selectNode(teleportAnim.node);
       teleportAnim = null;
@@ -2338,10 +2383,27 @@ renderer.setAnimationLoop((time, frame) => {
     _right.crossVectors(_fwd, camera.up).normalize();
 
     let mx = moveX, my = -moveY;
+    // Handheld AR (phone) has no gamepad, so pollVRControllers returns nothing
+    // and the rig never moved — only node-tapping worked. The on-screen
+    // joystick + vertical buttons (rendered in the AR dom-overlay, outside
+    // #hud) must drive locomotion here too, exactly as in Screen mode. In
+    // Quest VR the touch joystick is idle (joyVec 0), so this is additive and
+    // harmless there. Movement is camera-relative via _fwd/_right (the device
+    // pose), so pushing the stick forward flies where the phone is pointing.
+    const jmag = Math.hypot(joyVec.x, joyVec.y);
+    if (jmag > STICK_DEADZONE) {
+      const t = Math.min(1, (jmag - STICK_DEADZONE) / (1 - STICK_DEADZONE));
+      const eased = (t * t) / jmag;
+      mx += joyVec.x * eased;
+      my -= joyVec.y * eased;
+    }
     const mlen = Math.hypot(mx, my);
     if (mlen > 1) { mx /= mlen; my /= mlen; }
-    const speed = mlen > 0.85 ? VR_SPRINT_SPEED : VR_MOVE_SPEED;
+    let vy = 0;
+    if (flyMode) vy = Math.max(-1, Math.min(1, mobileVertical));
+    const speed = (mlen > 0.85 || jmag > 0.9) ? VR_SPRINT_SPEED : VR_MOVE_SPEED;
     _targetVel.set(0, 0, 0).addScaledVector(_fwd, my * speed).addScaledVector(_right, mx * speed);
+    _targetVel.y += vy * speed;
     velocity.lerp(_targetVel, smooth);
     rig.position.addScaledVector(velocity, dt);
   } else {
