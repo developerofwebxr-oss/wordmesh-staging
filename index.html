@@ -3054,25 +3054,57 @@ async function resolveChainName(address) {
   } catch { /* no name / offline → fall back to short address */ }
   return null;
 }
-// Wallet seam — MOCK now, real-shaped surface (like xr-stage/wallet/wallet.js).
-// connect() is READ-ONLY: address + .chain name. No keys held; signing/spend
-// (Phase C) will request a signature from the wallet, never hold a secret here.
+// Wallet — REAL Superhero Wallet login via @aeternity/aepp-sdk (READ-ONLY: it
+// reads the address + .chain name; keys never leave the wallet, no spend here —
+// Phase C will REQUEST a signed tx, never hold a secret). The SDK is dynamically
+// imported only on click (heavy dep, off the initial-load path). `?mockwallet=1`
+// forces a deterministic demo identity — used for headless/testing (no extension
+// exists there) and for a wallet-less demo. Mainnet.
 const MOCK_AE_ADDRESS = "ak_wordmeshDemoJ1qP7v9rT4kS2mN8xC5bZ3hL6dW0fY";
+const AE_MAINNET = "https://mainnet.aeternity.io";
+const AEPP_SDK_URL = "https://cdn.jsdelivr.net/npm/@aeternity/aepp-sdk@14/+esm";
+let _aeppSdkPromise = null;
+const loadAeppSdk = () => (_aeppSdkPromise ||= import(AEPP_SDK_URL));
 const wallet = {
-  connected: false, address: null, chainName: null,
+  connected: false, address: null, chainName: null, _sdk: null,
   async connect() {
-    // REAL: connect Superhero Wallet via @aeternity/aepp-sdk — browser extension
-    // through walletDetector(new BrowserWindowMessageConnection()), or the
-    // Superhero mobile app via deeplink; then read aeSdk.address. Bundling the
-    // aepp-sdk (a heavy dep) is a deferred decision — mocked here so the flow +
-    // embodiment are testable without a wallet.
-    await new Promise((r) => setTimeout(r, 250)); // simulate the connect round-trip
-    this.address = MOCK_AE_ADDRESS;
+    if (new URLSearchParams(location.search).get("mockwallet") === "1") {
+      await new Promise((r) => setTimeout(r, 200));
+      this.address = MOCK_AE_ADDRESS;
+    } else {
+      const { AeSdkAepp, Node, BrowserWindowMessageConnection, walletDetector } = await loadAeppSdk();
+      const aeSdk = new AeSdkAepp({
+        name: "WordMesh",
+        nodes: [{ name: "mainnet", instance: new Node(AE_MAINNET) }],
+        onNetworkChange: () => {},
+        onAddressChange: () => {},
+        onDisconnect: () => { try { this.disconnect(); unembody(); } catch {} },
+      });
+      // Detect the Superhero Wallet (browser extension postMessage / mobile
+      // in-app browser), connect, and read the active address. Times out with a
+      // clear message if no wallet answers.
+      this.address = await new Promise((resolve, reject) => {
+        let stop;
+        const timer = setTimeout(() => { try { stop && stop(); } catch {} reject(new Error("Superhero Wallet not detected — is the extension installed / the app browser open?")); }, 5000);
+        stop = walletDetector(new BrowserWindowMessageConnection(), async ({ newWallet }) => {
+          try {
+            clearTimeout(timer); stop();
+            await aeSdk.connectToWallet(newWallet.getConnection());
+            const sub = await aeSdk.subscribeAddress("subscribe", "connected");
+            resolve(Object.keys(sub.address.current)[0]);
+          } catch (e) { reject(e); }
+        });
+      });
+      this._sdk = aeSdk;
+    }
     this.chainName = await resolveChainName(this.address);
     this.connected = true;
     return { address: this.address, chainName: this.chainName };
   },
-  disconnect() { this.connected = false; this.address = null; this.chainName = null; },
+  disconnect() {
+    try { this._sdk?.disconnectWallet?.(); } catch {}
+    this._sdk = null; this.connected = false; this.address = null; this.chainName = null;
+  },
 };
 
 let localAvatar = null;
@@ -3106,7 +3138,11 @@ btnWallet.addEventListener("click", async () => {
   if (wallet.connected) { wallet.disconnect(); unembody(); return; }
   btnWallet.textContent = "Connecting…"; btnWallet.disabled = true;
   try { await wallet.connect(); embody(); }
-  catch (err) { console.warn("[WordMesh] wallet connect failed:", err.message); btnWallet.textContent = "Connect wallet"; }
+  catch (err) {
+    console.warn("[WordMesh] wallet connect failed:", err.message);
+    btnWallet.textContent = /not detected/.test(err.message) ? "No wallet found" : "Connect failed";
+    setTimeout(() => { if (!wallet.connected) btnWallet.textContent = "Connect wallet"; }, 3000);
+  }
   finally { btnWallet.disabled = false; }
 });
 // Spectator is the default — nothing to do until the user connects.
