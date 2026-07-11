@@ -281,6 +281,13 @@ class MockSource {
    No backend proxy needed. See CLAUDE.md Status log.
    ============================================================ */
 const SUPERHERO_API = "https://api.superhero.com";
+// Token set (2026-07-10 decision, see CLAUDE.md): the curated trending ~51 PLUS
+// every token created inside this rolling window (covers "new since Monday" and
+// keeps working as time passes). Full "all alive tokens" (~3,900) was rejected —
+// too many spheres for Quest/mobile and needs paging all 54k. New tokens created
+// mid-session are detected by polling and spark in live.
+const NEW_TOKEN_WINDOW_MS = 7 * 24 * 3600 * 1000; // 7 days
+const NEW_TOKEN_POLL_MS = 45000;                  // created_at poll cadence
 
 function withTimeout(promise, ms, label) {
   return Promise.race([
@@ -299,35 +306,57 @@ class SuperheroSource {
     this.bySaleAddr = new Map(); // sale_address -> word, for WS event -> node lookup
   }
 
-  async getSnapshot() {
-    // API hard-caps limit at 100; the real token universe (~51 today) fits
-    // in one page comfortably, so no pagination is needed
-    const limit = Math.min(this.nodeCount, 100);
-    const res = await withTimeout(
-      fetch(`${SUPERHERO_API}/api/tokens?order_by=trending_score&order_direction=DESC&limit=${limit}&page=1`),
-      8000, "getSnapshot"
-    );
+  // one place that turns a raw /api/tokens record into our node token shape.
+  // bonding-curve prices are fractions of an AE cent — too flat to size nodes
+  // by visually, so market cap (price*supply, real and live-updating) drives
+  // size; trending_score drives brightness (no 24h-volume field on this API).
+  _mapToken(t) {
+    const word = wordFromToken(t);
+    this.bySaleAddr.set(t.sale_address, word);
+    const decimals = Number(t.decimals) || 18;
+    return {
+      word,
+      price: parseFloat(t.price_data?.ae ?? t.price) || 0,
+      volume24h: Math.max(0, parseFloat(t.trending_score) || 0) * 1e5,
+      marketCap: (parseFloat(t.market_cap) || 0) / 10 ** decimals,
+      holders: t.holders_count,
+      saleAddress: t.sale_address,
+      createdAt: Date.parse(t.created_at || 0) || 0,
+    };
+  }
+
+  async _fetchList(query) {
+    const res = await withTimeout(fetch(`${SUPERHERO_API}/api/tokens?${query}`), 8000, "tokens");
     if (!res.ok) throw new Error(`tokens fetch failed: ${res.status}`);
-    const body = await res.json();
-    const tokens = (body.items || []).map((t) => {
-      const word = wordFromToken(t);
-      this.bySaleAddr.set(t.sale_address, word);
-      // bonding-curve prices are fractions of an AE cent — too flat to size
-      // nodes by visually, so market cap (price * supply, real and
-      // live-updating) drives size; trending_score drives brightness since
-      // there's no direct 24h-volume field on this endpoint
-      const decimals = Number(t.decimals) || 18;
-      const marketCap = (parseFloat(t.market_cap) || 0) / 10 ** decimals;
-      return {
-        word,
-        price: parseFloat(t.price_data?.ae ?? t.price) || 0,
-        volume24h: Math.max(0, parseFloat(t.trending_score) || 0) * 1e5,
-        marketCap,
-        holders: t.holders_count,
-        saleAddress: t.sale_address,
-      };
-    });
-    return { tokens };
+    return ((await res.json()).items || []);
+  }
+
+  // Snapshot = the curated trending set (what the API surfaces) MERGED with
+  // every token created inside NEW_TOKEN_WINDOW. `order_by=trending_score`
+  // returns a fixed ~51 that excludes freshly-created tokens entirely (a new
+  // token like DWEBCAMP never enters it), so recent creations are fetched
+  // separately by created_at and unioned in — that's how new tokens show at all.
+  async getSnapshot() {
+    const trending = await this._fetchList(`order_by=trending_score&order_direction=DESC&limit=100&page=1`);
+    let recent = [];
+    try { recent = await this._fetchList(`order_by=created_at&order_direction=DESC&limit=100&page=1`); }
+    catch (e) { console.warn("[WordMesh] recent-tokens fetch failed, trending only:", e.message); }
+    const cutoff = Date.now() - NEW_TOKEN_WINDOW_MS;
+    const seen = new Set(trending.map((t) => t.sale_address));
+    const merged = trending.slice();
+    for (const t of recent) {
+      if (seen.has(t.sale_address)) continue;
+      if ((Date.parse(t.created_at || 0) || 0) < cutoff) continue; // only genuinely-recent
+      seen.add(t.sale_address);
+      merged.push(t);
+    }
+    return { tokens: merged.map((t) => this._mapToken(t)) };
+  }
+
+  // Poll source for live new-token detection: newest tokens by creation.
+  async getRecentTokens() {
+    const items = await this._fetchList(`order_by=created_at&order_direction=DESC&limit=100&page=1`);
+    return items.map((t) => this._mapToken(t));
   }
 
   subscribe(cb) {
@@ -822,6 +851,53 @@ function buildNodesFromSnapshot(snap) {
   buildEdges();
 }
 
+// Add ONE freshly-created token to the live mesh, appended at the next
+// positional index so node identity stays intact (node i === token i — never
+// reorder, never reuse a slot; see CLAUDE.md [[wordmesh-node-identity]]). It
+// spawns with a big map-wide "birth" flash (n.birth, rendered in
+// refreshInstances) and the normal grow-in (spawnT), and radiates a couple of
+// pulses down its fresh edges — a birth is an event, so animation is on-grammar.
+function addLiveToken(tok) {
+  if (dataMode !== "live" || !tok || !tok.saleAddress) return null;
+  if (nodeBySale.has(tok.saleAddress)) return null;      // already on the map
+  const i = nodeData.length;
+  if (i >= NODE_COUNT) { console.warn("[WordMesh] node capacity reached, not adding", tok.word); return null; }
+
+  const r = (14 + Math.random() * 46) * spawnDensityScale;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const pos = new THREE.Vector3(
+    r * Math.sin(phi) * Math.cos(theta), r * Math.cos(phi) * 0.6, r * Math.sin(phi) * Math.sin(theta)
+  );
+  const baseColor = new THREE.Color().setHSL(hueForWord(i), 0.75, 0.55);
+  const sizeMetric = tok.marketCap != null ? tok.marketCap : tok.price;
+  const scale = liveSizeRange ? liveNormScale(sizeMetric, liveSizeRange, 0.35, 1.95) : 1;
+  const intensity = liveVolRange ? liveNormScale(tok.volume24h, liveVolRange, 0.6, 3.0) : 1.5;
+  const displayName = nodeData.some((n) => n.word === tok.word)
+    ? `${tok.word}·${tok.saleAddress.slice(3, 7)}` : tok.word;
+
+  const entry = {
+    word: tok.word, index: i, alive: true, displayName,
+    price: tok.price, volume24h: tok.volume24h, marketCap: tok.marketCap, saleAddress: tok.saleAddress,
+    pos, baseColor, scale, intensity,
+    flare: 1.0,          // initial event flare
+    birth: 1,            // drives the map-wide birth flash, decays over BIRTH_DURATION
+    dying: false, dieT: 0, spawnT: 1, // full size at once — the birth flash is the drama
+  };
+  nodeData.push(entry);
+  nodeBySale.set(entry.saleAddress, entry);
+  words.push(entry.word);
+  writeEmissiveAttributes(i, baseColor);
+  refreshNodeBounds();   // picking broad-phase includes the new node
+  buildEdges();          // connect it into the mesh immediately
+  // radiate a few birth pulses outward along its new edges
+  const fromIdx = edgeTowardNode(i);
+  if (fromIdx !== null) spawnPulse(fromIdx, i, baseColor.clone().lerp(new THREE.Color(0xffffff), 0.6), false);
+  console.info("[WordMesh] new token appeared:", entry.displayName, entry.saleAddress);
+  return entry;
+}
+const BIRTH_DURATION = 2.6; // seconds the birth flash lasts
+
 // Mock is instant/synchronous (no real network) and effectively can't
 // fail, so it just builds once. Live retries with backoff and drives the
 // honest connecting/live/offline badge + in-scene chip states — it never
@@ -843,6 +919,7 @@ async function connectDataSource() {
       if (!snap.tokens.length) throw new Error("empty token list");
       buildNodesFromSnapshot(snap);
       setConnectionState("live");
+      startNewTokenPolling();
       return;
     } catch (err) {
       console.warn("[WordMesh] live snapshot failed, will retry:", err.message);
@@ -854,15 +931,46 @@ async function connectDataSource() {
   }
 }
 
+// Live new-token detection: every NEW_TOKEN_POLL_MS, ask for the newest tokens
+// by creation and birth any we don't already have that were created inside the
+// window (so old non-trending tokens never flood in — only genuinely new ones,
+// which by construction are the ones created after load). Degrades silently on
+// a failed fetch (the mesh just keeps whatever it has). Socket has no verified
+// token-created event, so polling is the reliable channel (creation is ~1-2/day,
+// so a 45s poll is effectively instant).
+let newTokenPollTimer = null;
+function startNewTokenPolling() {
+  if (newTokenPollTimer || dataMode !== "live" || typeof source.getRecentTokens !== "function") return;
+  const cutoff = () => Date.now() - NEW_TOKEN_WINDOW_MS;
+  newTokenPollTimer = setInterval(async () => {
+    try {
+      const recent = await source.getRecentTokens();
+      const c = cutoff();
+      // oldest-first so multiple arrivals append in creation order
+      for (const tok of recent.slice().sort((a, b) => a.createdAt - b.createdAt)) {
+        if (!nodeBySale.has(tok.saleAddress) && tok.createdAt >= c) addLiveToken(tok);
+      }
+    } catch (err) {
+      console.warn("[WordMesh] new-token poll failed (will retry):", err.message);
+    }
+  }, NEW_TOKEN_POLL_MS);
+}
+
 function refreshInstances() {
   for (const n of nodeData) {
-    const s = (n.alive && !n.isFar ? n.scale : 0) * n.spawnT * (1 + n.flare * 0.9);
+    // birth flash: a newly-created token briefly balloons bright, then settles —
+    // a new star igniting, meant to be seen from across the map. eased so it
+    // pops then eases down. Added ON TOP of (outside) the normal flare clamp so
+    // it genuinely over-brightens for the flash without changing normal nodes.
+    const birth = n.birth || 0;
+    const birthEase = birth * birth;
+    const s = (n.alive && !n.isFar ? n.scale : 0) * n.spawnT * (1 + n.flare * 0.9 + birthEase * 2.0);
     tmpObj.position.copy(n.pos);
     tmpObj.scale.setScalar(Math.max(0.0001, s * 0.55));
     tmpObj.rotation.set(0, 0, 0);
     tmpObj.updateMatrix();
     nodeMesh.setMatrixAt(n.index, tmpObj.matrix);
-    const mult = Math.min(1.6, (n.intensity + n.flare * 2.2) * 0.5);
+    const mult = Math.min(1.6, (n.intensity + n.flare * 2.2) * 0.5) + birthEase * 6;
     tmpColor.copy(n.baseColor).multiplyScalar(mult);
     nodeMesh.setColorAt(n.index, tmpColor);
   }
@@ -2481,6 +2589,7 @@ renderer.setAnimationLoop((time, frame) => {
   // node flare decay + spawn/despawn animation
   for (const n of nodeData) {
     if (n.flare > 0) n.flare = Math.max(0, n.flare - dt * 1.6);
+    if (n.birth > 0) n.birth = Math.max(0, n.birth - dt / BIRTH_DURATION);
     // panel selection highlight: brightness/shine only, via the existing
     // flare mechanic (which only ever scales baseColor, never re-hues it)
     // — never a colour change, per the task's explicit guardrail
@@ -2662,7 +2771,7 @@ renderer.setAnimationLoop((time, frame) => {
 
 connectDataSource();
 setInterval(erlangBeat, ERLANG_INTERVAL);
-window.__wm = { scene, camera, renderer, nodeMesh, nodeData, rig, composer, edgeLines, THREE, source, dataMode, pulses, flareNodeReplay, onDataEvent, labelPool, leaderGeo, mouseNDC, get hoveredNodeIndex() { return hoveredNodeIndex; }, get selectedNodeIndex() { return selectedNodeIndex; }, get dragging() { return dragging; }, get pointerLocked() { return pointerLocked; }, get yaw() { return yaw; }, get pitch() { return pitch; }, get dragPointerId() { return dragPointerId; }, setYaw: (v) => { yaw = v; }, setJoyVec: (x, y) => { joyVec = { x, y }; }, panelMesh, panelLeaderGeo, statusChip, controllerRays, raycaster, selectFromRay, selectNode, get panelNodeIndex() { return panelNodeIndex; }, get panelHistory() { return panelHistory; }, badgeEl, connectDataSource, setConnectionState, get words() { return words; }, searchButtonMesh, searchGroup, searchPanelMesh, keyboardMesh, KEYBOARD_LAYOUT, toggleSearch, openSearch, closeSearch, pressKey, handleSelectRay, selectSearchResult, computeSearchMatches, get searchOpen() { return searchOpen; }, get searchQuery() { return searchQuery; }, get searchMatches() { return searchMatches; }, get teleportAnim() { return teleportAnim; } };
+window.__wm = { scene, camera, renderer, nodeMesh, nodeData, rig, composer, edgeLines, THREE, source, dataMode, pulses, flareNodeReplay, onDataEvent, labelPool, leaderGeo, mouseNDC, get hoveredNodeIndex() { return hoveredNodeIndex; }, get selectedNodeIndex() { return selectedNodeIndex; }, get dragging() { return dragging; }, get pointerLocked() { return pointerLocked; }, get yaw() { return yaw; }, get pitch() { return pitch; }, get dragPointerId() { return dragPointerId; }, setYaw: (v) => { yaw = v; }, setJoyVec: (x, y) => { joyVec = { x, y }; }, panelMesh, panelLeaderGeo, statusChip, controllerRays, raycaster, selectFromRay, selectNode, get panelNodeIndex() { return panelNodeIndex; }, get panelHistory() { return panelHistory; }, badgeEl, connectDataSource, setConnectionState, get words() { return words; }, searchButtonMesh, searchGroup, searchPanelMesh, keyboardMesh, KEYBOARD_LAYOUT, toggleSearch, openSearch, closeSearch, pressKey, handleSelectRay, selectSearchResult, computeSearchMatches, get searchOpen() { return searchOpen; }, get searchQuery() { return searchQuery; }, get searchMatches() { return searchMatches; }, get teleportAnim() { return teleportAnim; }, addLiveToken, get nodeBySale() { return nodeBySale; } };
 </script>
 </body>
 </html>
