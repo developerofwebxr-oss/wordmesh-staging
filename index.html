@@ -159,7 +159,7 @@
     <div id="left-controls">
       <button class="pill-btn on" id="btn-fly">Fly: ON</button>
       <button class="pill-btn" id="btn-freelook">Free look: OFF</button>
-      <button class="pill-btn" id="btn-wallet">Connect wallet</button>
+      <button class="pill-btn" id="btn-wallet">Connect Superhero Wallet</button>
     </div>
     <div id="footer-link">
       <a href="https://github.com/developerofwebxr-oss/wordmesh?ref=wordmesh" target="_blank" rel="noopener">wordmesh · repo</a>
@@ -3067,12 +3067,17 @@ let _aeppSdkPromise = null;
 const loadAeppSdk = () => (_aeppSdkPromise ||= import(AEPP_SDK_URL));
 const wallet = {
   connected: false, address: null, chainName: null, _sdk: null,
-  async connect() {
+  async connect(onStage) {
+    const stage = (s) => { console.info("[SuperheroWallet]", s); onStage && onStage(s); };
     if (new URLSearchParams(location.search).get("mockwallet") === "1") {
       await new Promise((r) => setTimeout(r, 200));
       this.address = MOCK_AE_ADDRESS;
     } else {
-      const { AeSdkAepp, Node, BrowserWindowMessageConnection, walletDetector } = await loadAeppSdk();
+      stage("loading SDK");
+      let sdk;
+      try { sdk = await loadAeppSdk(); }
+      catch (e) { const err = new Error("aepp-SDK failed to load (network/CDN blocked?)"); err.code = "sdk-load"; err.cause = e; throw err; }
+      const { AeSdkAepp, Node, BrowserWindowMessageConnection, walletDetector } = sdk;
       const aeSdk = new AeSdkAepp({
         name: "WordMesh",
         nodes: [{ name: "mainnet", instance: new Node(AE_MAINNET) }],
@@ -3080,23 +3085,39 @@ const wallet = {
         onAddressChange: () => {},
         onDisconnect: () => { try { this.disconnect(); unembody(); } catch {} },
       });
-      // Detect the Superhero Wallet (browser extension postMessage / mobile
-      // in-app browser), connect, and read the active address. Times out with a
-      // clear message if no wallet answers.
+      // Scan for the SUPERHERO wallet only (extension postMessage bridge, or the
+      // Superhero mobile app's in-app browser). The detector callback gives
+      // `newWallet` only for a freshly-announced wallet; if Superhero announced
+      // before we started scanning it's in `wallets` instead — handle both, or
+      // the connect silently never fires. Staged so a failed connect reports
+      // exactly WHERE it broke.
       this.address = await new Promise((resolve, reject) => {
-        let stop;
-        const timer = setTimeout(() => { try { stop && stop(); } catch {} reject(new Error("Superhero Wallet not detected — is the extension installed / the app browser open?")); }, 5000);
-        stop = walletDetector(new BrowserWindowMessageConnection(), async ({ newWallet }) => {
+        let stop, done = false;
+        const fail = (code, msg, cause) => { if (done) return; done = true; try { stop && stop(); } catch {} const e = new Error(msg); e.code = code; if (cause) e.cause = cause; reject(e); };
+        const timer = setTimeout(() => fail("no-wallet", "No Superhero Wallet detected — install the extension, or open this page inside the Superhero app browser."), 8000);
+        const handle = async ({ wallets, newWallet }) => {
+          const wlt = newWallet || Object.values(wallets || {})[0];
+          if (!wlt) return; // nothing yet — keep scanning
+          const name = wlt.info?.name || "";
+          if (!/superhero/i.test(name)) { console.info("[SuperheroWallet] ignoring non-Superhero wallet:", name); return; } // Superhero-only
+          if (done) return; done = true; clearTimeout(timer); try { stop(); } catch {}
           try {
-            clearTimeout(timer); stop();
-            await aeSdk.connectToWallet(newWallet.getConnection());
+            stage("connecting to " + name);
+            await aeSdk.connectToWallet(wlt.getConnection());
+            stage("requesting address (approve in the wallet)");
             const sub = await aeSdk.subscribeAddress("subscribe", "connected");
-            resolve(Object.keys(sub.address.current)[0]);
-          } catch (e) { reject(e); }
-        });
+            const addr = Object.keys(sub.address && sub.address.current || {})[0];
+            if (!addr) throw new Error("wallet returned no address (connection not approved?)");
+            resolve(addr);
+          } catch (e) { const err = new Error("Connection rejected or failed: " + (e && e.message || e)); err.code = "connect-failed"; err.cause = e; reject(err); }
+        };
+        stage("scanning for Superhero Wallet");
+        try { stop = walletDetector(new BrowserWindowMessageConnection(), handle); }
+        catch (e) { fail("detector", "wallet detector failed to start", e); }
       });
       this._sdk = aeSdk;
     }
+    stage("resolving .chain name");
     this.chainName = await resolveChainName(this.address);
     this.connected = true;
     return { address: this.address, chainName: this.chainName };
@@ -3131,19 +3152,27 @@ function embody() {
 function unembody() {
   if (localAvatar) { rig.remove(localAvatar); localAvatar = null; }
   identityChip.classList.remove("show");
-  btnWallet.textContent = "Connect wallet";
+  btnWallet.textContent = "Connect Superhero Wallet";
   btnWallet.classList.remove("on");
 }
+const WALLET_ERR_LABEL = {
+  "sdk-load": "SDK failed to load",
+  "no-wallet": "No Superhero Wallet found",
+  "connect-failed": "Wallet rejected connection",
+  "detector": "Wallet detector error",
+};
 btnWallet.addEventListener("click", async () => {
   if (wallet.connected) { wallet.disconnect(); unembody(); return; }
-  btnWallet.textContent = "Connecting…"; btnWallet.disabled = true;
-  try { await wallet.connect(); embody(); }
-  catch (err) {
-    console.warn("[WordMesh] wallet connect failed:", err.message);
-    btnWallet.textContent = /not detected/.test(err.message) ? "No wallet found" : "Connect failed";
-    setTimeout(() => { if (!wallet.connected) btnWallet.textContent = "Connect wallet"; }, 3000);
-  }
-  finally { btnWallet.disabled = false; }
+  btnWallet.disabled = true; btnWallet.textContent = "Connecting…";
+  try {
+    await wallet.connect((s) => { btnWallet.textContent = "Connecting… " + s; });
+    embody();
+  } catch (err) {
+    // full detail to the console so the user can screenshot the exact reason
+    console.error("[SuperheroWallet] connect failed —", err.code || "unknown", "—", err.message, "\ncause:", err.cause || err);
+    btnWallet.textContent = WALLET_ERR_LABEL[err.code] || "Connect failed (see console)";
+    setTimeout(() => { if (!wallet.connected) btnWallet.textContent = "Connect Superhero Wallet"; }, 6000);
+  } finally { btnWallet.disabled = false; }
 });
 // Spectator is the default — nothing to do until the user connects.
 
